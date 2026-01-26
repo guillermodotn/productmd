@@ -16,10 +16,12 @@
 # License along with this program.  If not, see
 # <http://www.gnu.org/licenses/>.
 
-# Note this file is templated with Tito. Please make changes to
-# .tito/templates/__init__.py.in in Git.
+from importlib.metadata import version, PackageNotFoundError
 
-__version__ = '1.50'
+try:
+    __version__ = version("productmd")
+except PackageNotFoundError:
+    __version__ = "unknown"
 
 from .compose import Compose  # noqa
 from .composeinfo import ComposeInfo  # noqa
