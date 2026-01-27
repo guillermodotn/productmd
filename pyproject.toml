@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
@@ -47,20 +47,21 @@ dev = [
 ]
 
 [tool.hatch.version]
-path = "productmd/__init__.py"
+#path = "productmd/__init__.py"
+source = "vcs"
 
-[tool.hatch.build.targets.sdist]
-include = [
-    "productmd/",
-    "tests/",
-    "doc/",
-    "AUTHORS",
-    "LICENSE",
-    "Makefile",
-]
-
-[tool.hatch.build.targets.wheel]
-packages = ["productmd"]
+# [tool.hatch.build.targets.sdist]
+# include = [
+#     "productmd/",
+#     "tests/",
+#     "doc/",
+#     "AUTHORS",
+#     "LICENSE",
+#     "Makefile",
+# ]
+#
+# [tool.hatch.build.targets.wheel]
+# packages = ["productmd"]
 
 # Ruff configuration (replaces flake8 and ruff.toml)
 [tool.ruff]
