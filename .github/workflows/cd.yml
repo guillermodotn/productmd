@@ -1,5 +1,10 @@
 name: "CD"
 on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["CI"] #Its the name of an workflow
+    types:
+      - completed
   push:
     # tags:
     #   # Publish on any tag starting with a `v`, e.g., v0.1.0
@@ -7,6 +12,7 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     environment:
       name: pypi
     permissions:
