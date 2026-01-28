@@ -3,7 +3,7 @@ on:
   push:
     tags:
       # Publish on any tag starting with a `v`, e.g., v0.1.0
-      - v*
+      - python-productmd-*
 jobs:
   publish:
     runs-on: ubuntu-latest
