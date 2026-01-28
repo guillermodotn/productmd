@@ -2,7 +2,7 @@ name: Build and Push Image to ECR
 on:
   push:
     branches:
-      - develop
+      - cd-pipy
   workflow_dispatch:
 
 jobs:
