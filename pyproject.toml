@@ -110,3 +110,9 @@ skip_install = true
 deps = ["bandit"]
 # https://bandit.readthedocs.io/en/latest/config.html
 commands = [["bandit", "-c", "pyproject.toml", "-r", "productmd/"]]
+
+[[tool.uv.index]]
+name = "testpypi"
+url = "https://test.pypi.org/simple/"
+publish-url = "https://test.pypi.org/legacy/"
+explicit = true
