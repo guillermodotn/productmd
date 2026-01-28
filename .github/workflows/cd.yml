@@ -8,8 +8,8 @@ jobs:
   publish:
     runs-on: ubuntu-latest
 
-    container:
-      image: fedora:latest
+    # container:
+    #   image: fedora:latest
 
     environment:
       name: pypi
