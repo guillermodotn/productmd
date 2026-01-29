@@ -40,11 +40,10 @@ jobs:
           if: matrix.python-version == "3.6"
 
       - name: Install dependencies
+        if: matrix.python-version == "3.6"
         run: |
           python -m pip install --upgrade pip
           pip install . pytest setuptools setuptools-scm  # Or uv pip install if using uv
-        with:
-          if: matrix.python-version == "3.6"
 
       - name: Install uv and setup Python version
         uses: astral-sh/setup-uv@v7
@@ -55,14 +54,12 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
+        if: matrix.python-version != "3.6"
         run: uv sync --group test --group coverage --no-dev
-        with:
-          if: matrix.python-version != "3.6"
 
       - name: Run tests
+        if: matrix.python-version != "3.6"
         run: uv run pytest --cov=productmd tests
-        with:
-          if: matrix.python-version != "3.6"
 
   bandit:
     runs-on: ubuntu-latest
