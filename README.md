@@ -37,6 +37,17 @@ uvx tox list
 # Run a specific environment
 uvx tox -e py312
 ```
+> [!IMPORTANT]
+> #### Testing with Python 3.6
+>
+>Python 3.6 is EOL and incompatible with modern tooling. Use the provided container for legacy testing:
+>
+>```bash
+>podman build -f Containerfile.py36 -t productmd-py36-test .
+>podman run --rm productmd-py36-test
+>```
+>
+>For an interactive shell: `podman run --rm -it productmd-py36-test /bin/bash`
 
 ### Code Quality
 
@@ -58,9 +69,22 @@ uv build
 ```
 This will generate the **source** and **wheel** packages under the `dist` directory.
 
-### Versioning
+### Releasing
 
-Versions are dynamically generated from git tags using [hatch-vcs](https://github.com/ofek/hatch-vcs). To release a new version, tag the commit on the `master` branch.
+To release a new version:
+
+```bash
+# Bump version in pyproject.toml
+uv version <new_version>
+
+# Commit, tag, and push
+git add pyproject.toml
+git commit -m "Bump version to <new_version>"
+git tag <new_version>
+git push origin master --tags
+```
+
+See [uv version docs](https://docs.astral.sh/uv/reference/cli/#uv-version) for other version commands (e.g., `uv version --bump minor`).
 
 ## License
 
