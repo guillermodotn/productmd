@@ -46,11 +46,13 @@ Example::
 """
 
 import productmd.common
-from productmd.common import Header
+from productmd.common import Header, VERSION_2_0
 from productmd.composeinfo import Compose
+from productmd.location import Location
 
 from collections import namedtuple
 from itertools import chain
+
 
 __all__ = (
     "Image",
@@ -138,6 +140,33 @@ class Images(productmd.common.MetadataBase):
         self.header = Header(self, "productmd.images")
         self.compose = Compose(self)
         self.images = {}
+        self._output_version = None  # None = use productmd.common.VERSION
+
+    @property
+    def output_version(self):
+        """
+        Get the version to use when serializing.
+
+        :return: Version tuple (major, minor)
+        :rtype: tuple
+        """
+        if self._output_version is not None:
+            return self._output_version
+        return productmd.common.VERSION
+
+    @output_version.setter
+    def output_version(self, version):
+        """
+        Set the version to use when serializing.
+
+        :param version: Version tuple or string (e.g., (2, 0) or "2.0")
+        :type version: tuple or str
+        """
+        if isinstance(version, str):
+            parts = version.split(".")
+            self._output_version = (int(parts[0]), int(parts[1]))
+        else:
+            self._output_version = tuple(version)
 
     def __getitem__(self, variant):
         return self.images[variant]
@@ -145,33 +174,58 @@ class Images(productmd.common.MetadataBase):
     def __delitem__(self, variant):
         del self.images[variant]
 
-    def serialize(self, parser):
+    def serialize(self, parser, force_version=None):
+        """
+        Serialize images metadata.
+
+        :param parser: Dictionary to serialize into
+        :type parser: dict
+        :param force_version: Force output version (overrides output_version)
+        :type force_version: tuple or None
+        """
         data = parser
+
+        # Determine output version
+        output_version = force_version or self._output_version or productmd.common.VERSION
+
         self.header.serialize(data)
+
+        # Update header version for v2.0 (after serialize, which sets current version)
+        if output_version >= VERSION_2_0:
+            data["header"]["version"] = "2.0"
         data["payload"] = {}
         data["payload"]["images"] = {}
         self.compose.serialize(data["payload"])
+
         for variant in self.images:
             for arch in self.images[variant]:
                 for image_obj in self.images[variant][arch]:
                     images = data["payload"]["images"].setdefault(variant, {}).setdefault(arch, [])
-                    image_obj.serialize(images)
-                    images.sort(key=lambda x: x["path"])
+                    image_obj.serialize(images, force_version=output_version)
+                    # Sort by path or local_path depending on version
+                    if output_version >= VERSION_2_0:
+                        images.sort(key=lambda x: x.get("location", {}).get("local_path", ""))
+                    else:
+                        images.sort(key=lambda x: x.get("path", ""))
         return data
 
     def deserialize(self, data):
         self.header.deserialize(data)
+        # Store the original file version for format detection
+        file_version = self.header.version_tuple
         self.compose.deserialize(data["payload"])
         for variant in data["payload"]["images"]:
             for arch in data["payload"]["images"][variant]:
                 for image in data["payload"]["images"][variant][arch]:
                     image_obj = Image(self)
                     image_obj.deserialize(image)
-                    if self.header.version_tuple <= (1, 1):
+                    if file_version <= (1, 1):
                         self._add_1_1(data, variant, arch, image_obj)
                     else:
                         self.add(variant, arch, image_obj)
-        self.header.set_current_version()
+        # Preserve the original file version (don't reset to current)
+        # This allows proper round-trip and version detection
+        # Output version can be controlled via output_version property
 
     def _add_1_1(self, data, variant, arch, image):
         if arch == "src":
@@ -251,9 +305,74 @@ class Image(productmd.common.MetadataBase):
         self.subvariant = None  #: (*str*) -- image contents, may be same as variant or e.g. 'KDE', 'LXDE'
         self.unified = False  #: (*bool=False*) -- indicates if the ISO contains content from multiple variants
         self.additional_variants = []  #: (*[str]*) -- indicates which variants are present on the ISO
+        # v2.0: Location object for distributed composes
+        self._location = None  #: (:class:`productmd.location.Location` or *None*) -- v2.0 location object
 
     def __repr__(self):
         return "<Image:{0.path}:{0.format}:{0.arch}>".format(self)
+
+    @property
+    def location(self):
+        """
+        Get or create a Location object for this image (v2.0).
+
+        For v1.2 images, this creates a Location from path/size/checksums.
+        For v2.0 images, this returns the stored Location.
+
+        :return: Location object
+        :rtype: :class:`productmd.location.Location`
+        """
+        if self._location is not None:
+            return self._location
+
+        # Create Location from v1.2 fields
+        # Location is imported at module level
+        checksum = None
+        if self.checksums:
+            # Prefer sha256, fall back to first available
+            if "sha256" in self.checksums:
+                checksum = f"sha256:{self.checksums['sha256']}"
+            else:
+                algo = list(self.checksums.keys())[0]
+                checksum = f"{algo}:{self.checksums[algo]}"
+
+        return Location(
+            url=self.path,
+            size=self.size,
+            checksum=checksum,
+            local_path=self.path,
+        )
+
+    @location.setter
+    def location(self, loc):
+        """
+        Set the Location object for this image (v2.0).
+
+        This also updates the v1.2 compatibility fields (path, size, checksums).
+
+        :param loc: Location object
+        :type loc: :class:`productmd.location.Location`
+        """
+        self._location = loc
+        if loc is not None:
+            # Update v1.2 compatibility fields
+            self.path = loc.local_path
+            self.size = loc.size
+            if loc.checksum:
+                algo, digest = loc.checksum.split(":", 1)
+                self.checksums = {algo: digest}
+
+    @property
+    def is_remote(self):
+        """
+        Check if this image has a remote location (v2.0 distributed).
+
+        :return: True if image is stored remotely
+        :rtype: bool
+        """
+        if self._location is not None:
+            return self._location.is_remote
+        return False
 
     def _validate_path(self):
         self._assert_type("path", [str])
@@ -312,24 +431,58 @@ class Image(productmd.common.MetadataBase):
         if self.additional_variants and not self.unified:
             raise ValueError("Only unified images can contain multiple variants")
 
-    def serialize(self, parser):
+    def serialize(self, parser, force_version=None):
+        """
+        Serialize image to a list (appends to parser).
+
+        :param parser: List to append serialized data to
+        :type parser: list
+        :param force_version: Force output version (default: use parent's version)
+        :type force_version: tuple or None
+        """
         data = parser
         self.validate()
-        result = {
-            "path": self.path,
-            "mtime": self.mtime,
-            "size": self.size,
-            "volume_id": self.volume_id,
-            "type": self.type,
-            "format": self.format,
-            "arch": self.arch,
-            "disc_number": self.disc_number,
-            "disc_count": self.disc_count,
-            "checksums": self.checksums,
-            "implant_md5": self.implant_md5,
-            "bootable": self.bootable,
-            "subvariant": self.subvariant,
-        }
+
+        # Determine output version
+        output_version = force_version
+        if output_version is None:
+            output_version = getattr(self.parent, '_output_version', None)
+        if output_version is None:
+            output_version = productmd.common.VERSION
+
+        # v2.0 format with location object
+        if output_version >= VERSION_2_0:
+            result = {
+                "location": self.location.serialize(),
+                "mtime": self.mtime,
+                "volume_id": self.volume_id,
+                "type": self.type,
+                "format": self.format,
+                "arch": self.arch,
+                "disc_number": self.disc_number,
+                "disc_count": self.disc_count,
+                "implant_md5": self.implant_md5,
+                "bootable": self.bootable,
+                "subvariant": self.subvariant,
+            }
+        else:
+            # v1.x format with path/size/checksums
+            result = {
+                "path": self.path,
+                "mtime": self.mtime,
+                "size": self.size,
+                "volume_id": self.volume_id,
+                "type": self.type,
+                "format": self.format,
+                "arch": self.arch,
+                "disc_number": self.disc_number,
+                "disc_count": self.disc_count,
+                "checksums": self.checksums,
+                "implant_md5": self.implant_md5,
+                "bootable": self.bootable,
+                "subvariant": self.subvariant,
+            }
+
         if self.unified:
             # Only add the `unified` field if it doesn't have the default value.
             result['unified'] = self.unified
@@ -337,6 +490,25 @@ class Image(productmd.common.MetadataBase):
         data.append(result)
 
     def deserialize(self, data):
+        """
+        Deserialize image from a dictionary.
+
+        Uses header version to determine format:
+        - v2.0+: Uses Location objects
+        - v1.x: Uses path/size/checksums fields
+
+        :param data: Dictionary with image data
+        :type data: dict
+        """
+        # Use header version for format detection (per spec section 9.1)
+        if self.parent.header.version_tuple >= VERSION_2_0:
+            self._deserialize_v2(data)
+        else:
+            self._deserialize_v1(data)
+        self.validate()
+
+    def _deserialize_v1(self, data):
+        """Deserialize from v1.x format (path/size/checksums as separate fields)."""
         self.path = data["path"]
         self.mtime = int(data["mtime"])
         self.size = int(data["size"])
@@ -356,7 +528,35 @@ class Image(productmd.common.MetadataBase):
             self.subvariant = data["subvariant"]
         self.unified = data.get('unified', False)
         self.additional_variants = data.get("additional_variants", [])
-        self.validate()
+        self._location = None
+
+    def _deserialize_v2(self, data):
+        """Deserialize from v2.0 format (location object)."""
+        # Location is imported at module level
+        self._location = Location.from_dict(data["location"])
+
+        # Populate v1.2 compatibility fields from location
+        self.path = self._location.local_path
+        self.size = self._location.size
+        if self._location.checksum:
+            algo, digest = self._location.checksum.split(":", 1)
+            self.checksums = {algo: digest}
+        else:
+            self.checksums = {}
+
+        # Other fields
+        self.mtime = int(data.get("mtime", 0))
+        self.volume_id = data.get("volume_id", "")
+        self.type = data["type"]
+        self.format = data.get("format", "iso")
+        self.arch = data["arch"]
+        self.disc_number = int(data.get("disc_number", 1))
+        self.disc_count = int(data.get("disc_count", 1))
+        self.implant_md5 = data.get("implant_md5", None)
+        self.bootable = bool(data.get("bootable", False))
+        self.subvariant = data.get("subvariant", "")
+        self.unified = data.get('unified', False)
+        self.additional_variants = data.get("additional_variants", [])
 
     def add_checksum(self, root, checksum_type, checksum_value):
         if checksum_type in self.checksums:
