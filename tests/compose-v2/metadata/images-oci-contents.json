@@ -19,7 +19,7 @@
             "disc_count": 1,
             "disc_number": 1,
             "format": "iso",
-            "implant_md5": "a1b2c3d4e5f6a7b8c9d0e1f2",
+            "implant_md5": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
             "mtime": 1738627200,
             "subvariant": "",
             "type": "dvd",
@@ -38,7 +38,7 @@
             "mtime": 1738627200,
             "subvariant": "pxeboot",
             "type": "boot",
-            "volume_id": "",
+            "volume_id": null,
             "location": {
               "url": "oci://quay.io/fedora/boot-files:server-41-x86_64@sha256:def4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
               "size": 101376000,
@@ -81,7 +81,7 @@
             "mtime": 1738627200,
             "subvariant": "pxeboot",
             "type": "boot",
-            "volume_id": "",
+            "volume_id": null,
             "location": {
               "url": "oci://quay.io/fedora/boot-files:server-41-aarch64@sha256:abc0123456789abcdef0123456789abcdef0123456789abcdef0123456789abc0",
               "size": 95000000,
