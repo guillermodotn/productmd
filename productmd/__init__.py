@@ -36,6 +36,7 @@ from .compose import Compose  # noqa
 from .composeinfo import ComposeInfo  # noqa
 from .discinfo import DiscInfo  # noqa
 from .images import Images  # noqa
+from .location import FileEntry, Location  # noqa
 from .modules import Modules  # noqa
 from .rpms import Rpms  # noqa
 from .treeinfo import TreeInfo  # noqa
