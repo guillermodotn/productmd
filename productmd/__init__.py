@@ -40,3 +40,13 @@ from .location import FileEntry, Location  # noqa
 from .modules import Modules  # noqa
 from .rpms import Rpms  # noqa
 from .treeinfo import TreeInfo  # noqa
+from .version import (  # noqa
+    VERSION_1_0,
+    VERSION_1_1,
+    VERSION_1_2,
+    VERSION_2_0,
+    detect_version,
+    detect_version_from_data,
+    is_v1,
+    is_v2,
+)

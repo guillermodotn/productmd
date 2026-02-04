@@ -39,7 +39,16 @@ import http.client
 from configparser import ConfigParser
 from io import StringIO
 
+# Current metadata format version
+# v1.2: Local compose format with relative paths
+# v2.0: Distributed compose format with Location objects
 VERSION = (1, 2)
+
+# Supported versions for reading
+SUPPORTED_VERSIONS = [(1, 0), (1, 1), (1, 2), (2, 0)]
+
+# Version 2.0 constants
+VERSION_2_0 = (2, 0)
 
 # Get library version for User-Agent
 try:
