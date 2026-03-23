@@ -11,9 +11,11 @@ from productmd.localize import (
     HttpTask,
     LocalizeResult,
     OciTask,
+    _build_auth_header,
     _deduplicate_http_tasks,
     _download_https,
     _download_single_oci,
+    _get_netrc_auth_header,
     _should_skip,
     _should_skip_oci,
     localize_compose,
@@ -1117,3 +1119,261 @@ class TestDeduplicateHttpTasks:
         )
         result = _deduplicate_http_tasks([task1, task2])
         assert len(result) == 2
+
+
+# ---------------------------------------------------------------------------
+# Tests: HTTP Authentication
+# ---------------------------------------------------------------------------
+
+
+class TestGetNetrcAuthHeader:
+    """Tests for _get_netrc_auth_header."""
+
+    def test_netrc_auth_found(self, tmp_path):
+        """Test that matching netrc credentials produce a Basic auth header."""
+        netrc_file = tmp_path / ".netrc"
+        netrc_file.write_text("machine pulp.example.com\nlogin admin\npassword secret123\n")
+
+        result = _get_netrc_auth_header("https://pulp.example.com/repo/file.rpm", str(netrc_file))
+
+        assert result is not None
+        assert result.startswith("Basic ")
+        import base64
+
+        decoded = base64.b64decode(result.split(" ", 1)[1]).decode()
+        assert decoded == "admin:secret123"
+
+    def test_netrc_host_not_found(self, tmp_path):
+        """Test that no match returns None."""
+        netrc_file = tmp_path / ".netrc"
+        netrc_file.write_text("machine other.example.com\nlogin user\npassword pass\n")
+
+        result = _get_netrc_auth_header("https://pulp.example.com/file.rpm", str(netrc_file))
+
+        assert result is None
+
+    def test_netrc_file_missing(self):
+        """Test that a missing netrc file returns None without error."""
+        result = _get_netrc_auth_header("https://pulp.example.com/file.rpm", "/nonexistent/.netrc")
+
+        assert result is None
+
+    def test_netrc_parse_error(self, tmp_path):
+        """Test that a malformed netrc file returns None without error."""
+        netrc_file = tmp_path / ".netrc"
+        netrc_file.write_text("this is not valid netrc content!!!\n~~~")
+
+        result = _get_netrc_auth_header("https://pulp.example.com/file.rpm", str(netrc_file))
+
+        assert result is None
+
+    def test_netrc_custom_file(self, tmp_path):
+        """Test that a custom netrc file path is used."""
+        custom_netrc = tmp_path / "custom-netrc"
+        custom_netrc.write_text("machine cdn.example.com\nlogin deploy\npassword s3cret\n")
+
+        result = _get_netrc_auth_header("https://cdn.example.com/boot.iso", str(custom_netrc))
+
+        assert result is not None
+        import base64
+
+        decoded = base64.b64decode(result.split(" ", 1)[1]).decode()
+        assert decoded == "deploy:s3cret"
+
+    def test_netrc_no_hostname_in_url(self):
+        """Test that a URL with no hostname returns None."""
+        result = _get_netrc_auth_header("file:///local/path", None)
+
+        assert result is None
+
+
+class TestBuildAuthHeader:
+    """Tests for _build_auth_header precedence logic."""
+
+    def test_explicit_basic_auth(self):
+        """Test that explicit username/password produce a Basic header."""
+        result = _build_auth_header("https://example.com/file", username="user", password="pass")
+
+        assert result is not None
+        assert result.startswith("Basic ")
+        import base64
+
+        decoded = base64.b64decode(result.split(" ", 1)[1]).decode()
+        assert decoded == "user:pass"
+
+    def test_bearer_token(self):
+        """Test that a token produces a Bearer header."""
+        result = _build_auth_header("https://example.com/file", token="my-jwt-token")
+
+        assert result == "Bearer my-jwt-token"
+
+    def test_token_overrides_basic(self):
+        """Test that token takes precedence over username/password."""
+        result = _build_auth_header(
+            "https://example.com/file",
+            username="user",
+            password="pass",
+            token="my-token",
+        )
+
+        assert result == "Bearer my-token"
+
+    def test_token_overrides_netrc(self, tmp_path):
+        """Test that token takes precedence over netrc credentials."""
+        netrc_file = tmp_path / ".netrc"
+        netrc_file.write_text("machine example.com\nlogin admin\npassword secret\n")
+
+        result = _build_auth_header(
+            "https://example.com/file",
+            token="my-token",
+            netrc_file=str(netrc_file),
+        )
+
+        assert result == "Bearer my-token"
+
+    def test_explicit_basic_overrides_netrc(self, tmp_path):
+        """Test that explicit credentials override netrc."""
+        netrc_file = tmp_path / ".netrc"
+        netrc_file.write_text("machine example.com\nlogin netrc-user\npassword netrc-pass\n")
+
+        result = _build_auth_header(
+            "https://example.com/file",
+            username="explicit-user",
+            password="explicit-pass",
+            netrc_file=str(netrc_file),
+        )
+
+        assert result is not None
+        assert result.startswith("Basic ")
+        import base64
+
+        decoded = base64.b64decode(result.split(" ", 1)[1]).decode()
+        assert decoded == "explicit-user:explicit-pass"
+
+    def test_falls_back_to_netrc(self, tmp_path):
+        """Test that netrc is used when no explicit credentials are given."""
+        netrc_file = tmp_path / ".netrc"
+        netrc_file.write_text("machine example.com\nlogin netrc-user\npassword netrc-pass\n")
+
+        result = _build_auth_header("https://example.com/file", netrc_file=str(netrc_file))
+
+        assert result is not None
+        import base64
+
+        decoded = base64.b64decode(result.split(" ", 1)[1]).decode()
+        assert decoded == "netrc-user:netrc-pass"
+
+    def test_no_credentials_returns_none(self):
+        """Test that None is returned when no auth is available."""
+        result = _build_auth_header(
+            "https://example.com/file",
+            netrc_file="/nonexistent/.netrc",
+        )
+
+        assert result is None
+
+
+class TestDownloadHttpsAuth:
+    """Tests for authentication in _download_https."""
+
+    @patch("productmd.localize.urllib.request.urlopen")
+    def test_download_sends_basic_auth_header(self, mock_urlopen, tmp_path):
+        """Test that explicit credentials add Authorization header to request."""
+        mock_urlopen.return_value = _mock_urlopen(b"content")
+        dest = str(tmp_path / "file.rpm")
+
+        _download_https(
+            "https://pulp.example.com/file.rpm",
+            dest,
+            retries=0,
+            username="admin",
+            password="secret",
+        )
+
+        req = mock_urlopen.call_args[0][0]
+        assert req.get_header("Authorization").startswith("Basic ")
+
+    @patch("productmd.localize.urllib.request.urlopen")
+    def test_download_sends_bearer_token_header(self, mock_urlopen, tmp_path):
+        """Test that a token adds a Bearer Authorization header."""
+        mock_urlopen.return_value = _mock_urlopen(b"content")
+        dest = str(tmp_path / "file.rpm")
+
+        _download_https(
+            "https://pulp.example.com/file.rpm",
+            dest,
+            retries=0,
+            token="jwt-token-here",
+        )
+
+        req = mock_urlopen.call_args[0][0]
+        assert req.get_header("Authorization") == "Bearer jwt-token-here"
+
+    @patch("productmd.localize.urllib.request.urlopen")
+    def test_download_sends_netrc_auth_header(self, mock_urlopen, tmp_path):
+        """Test that netrc credentials add Authorization header."""
+        mock_urlopen.return_value = _mock_urlopen(b"content")
+        netrc_file = tmp_path / ".netrc"
+        netrc_file.write_text("machine pulp.example.com\nlogin admin\npassword secret\n")
+        dest = str(tmp_path / "file.rpm")
+
+        _download_https(
+            "https://pulp.example.com/file.rpm",
+            dest,
+            retries=0,
+            netrc_file=str(netrc_file),
+        )
+
+        req = mock_urlopen.call_args[0][0]
+        assert req.get_header("Authorization").startswith("Basic ")
+
+    @patch("productmd.localize.urllib.request.urlopen")
+    def test_download_no_auth_by_default(self, mock_urlopen, tmp_path):
+        """Test that no Authorization header is set when no auth is configured."""
+        mock_urlopen.return_value = _mock_urlopen(b"content")
+        dest = str(tmp_path / "file.rpm")
+
+        _download_https(
+            "https://pulp.example.com/file.rpm",
+            dest,
+            retries=0,
+            netrc_file="/nonexistent/.netrc",
+        )
+
+        req = mock_urlopen.call_args[0][0]
+        assert req.get_header("Authorization") is None
+
+    @patch("productmd.localize.urllib.request.urlopen")
+    def test_localize_compose_passes_auth_credentials(self, mock_urlopen, tmp_path):
+        """Test that localize_compose passes auth params to _download_https."""
+        mock_urlopen.return_value = _mock_urlopen(b"x" * 512)
+        images = _create_images_v2()
+
+        localize_compose(
+            output_dir=str(tmp_path),
+            images=images,
+            parallel_downloads=1,
+            verify_checksums=False,
+            http_username="user",
+            http_password="pass",
+        )
+
+        req = mock_urlopen.call_args[0][0]
+        assert req.get_header("Authorization").startswith("Basic ")
+
+    @patch("productmd.localize.urllib.request.urlopen")
+    def test_localize_compose_passes_token(self, mock_urlopen, tmp_path):
+        """Test that localize_compose passes token to _download_https."""
+        mock_urlopen.return_value = _mock_urlopen(b"x" * 512)
+        images = _create_images_v2()
+
+        localize_compose(
+            output_dir=str(tmp_path),
+            images=images,
+            parallel_downloads=1,
+            verify_checksums=False,
+            http_token="my-bearer-token",
+        )
+
+        req = mock_urlopen.call_args[0][0]
+        assert req.get_header("Authorization") == "Bearer my-bearer-token"
