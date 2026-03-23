@@ -72,6 +72,16 @@ def register(subparsers: object) -> None:
         default=os.environ.get("PRODUCTMD_NETRC_FILE"),
         help=("Path to a netrc file for HTTP credential lookup (default: ~/.netrc). Can also be set via PRODUCTMD_NETRC_FILE env var."),
     )
+    parser.add_argument(
+        "--http-username",
+        default=None,
+        help=("Username for HTTP Basic authentication. Takes precedence over netrc credentials."),
+    )
+    parser.add_argument(
+        "--http-password",
+        default=os.environ.get("PRODUCTMD_HTTP_PASSWORD"),
+        help=("Password for HTTP Basic authentication. Can also be set via PRODUCTMD_HTTP_PASSWORD env var."),
+    )
     add_input_args(parser)
     parser.set_defaults(func=run)
 
@@ -99,6 +109,8 @@ def run(args: object) -> None:
             fail_fast=args.fail_fast,
             progress_callback=progress_callback,
             netrc_file=args.netrc_file,
+            http_username=args.http_username,
+            http_password=args.http_password,
             **metadata,
         )
     finally:
