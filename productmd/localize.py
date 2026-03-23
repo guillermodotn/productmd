@@ -154,6 +154,8 @@ def _download_https(
     progress_callback: Optional[Callable] = None,
     filename: str = "",
     netrc_file: Optional[str] = None,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
 ) -> None:
     """
     Download a file from an HTTP(S) URL to a local path.
@@ -162,8 +164,10 @@ def _download_https(
     atomically to avoid partial files.  Retries on failure with
     exponential backoff.
 
-    When *netrc_file* is provided (or ``~/.netrc`` exists), credentials
-    matching the URL hostname are used for HTTP Basic authentication.
+    When *username* and *password* are provided, they are used for HTTP
+    Basic authentication and take precedence over netrc credentials.
+    Otherwise, when ``~/.netrc`` (or *netrc_file*) contains credentials
+    matching the URL hostname, those are used instead.
 
     :param url: HTTP(S) URL to download from
     :param dest_path: Local file path to save to
@@ -172,6 +176,9 @@ def _download_https(
     :param filename: Relative path for progress event reporting
     :param netrc_file: Path to a netrc file for credential lookup.
         When ``None``, the standard ``~/.netrc`` is used.
+    :param username: Username for HTTP Basic authentication.
+        Takes precedence over netrc credentials.
+    :param password: Password for HTTP Basic authentication.
     :raises urllib.error.URLError: If all retry attempts fail
     """
     parent_dir = os.path.dirname(dest_path)
@@ -182,9 +189,13 @@ def _download_https(
     last_error = None
 
     headers = _get_default_headers()
-    auth_header = _get_netrc_auth_header(url, netrc_file)
-    if auth_header:
-        headers["Authorization"] = auth_header
+    if username is not None and password is not None:
+        credentials = b64encode(f"{username}:{password}".encode()).decode()
+        headers["Authorization"] = f"Basic {credentials}"
+    else:
+        auth_header = _get_netrc_auth_header(url, netrc_file)
+        if auth_header:
+            headers["Authorization"] = auth_header
 
     for attempt in range(retries + 1):
         try:
@@ -629,6 +640,8 @@ def localize_compose(
     retries: int = 3,
     progress_callback: Optional[Callable] = None,
     netrc_file: Optional[str] = None,
+    http_username: Optional[str] = None,
+    http_password: Optional[str] = None,
 ) -> LocalizeResult:
     """
     Localize a distributed v2.0 compose to local storage.
@@ -641,9 +654,9 @@ def localize_compose(
     require ``oras-py`` (``pip install productmd[oci]``).  Authentication
     supports Docker and Podman credential stores.
 
-    HTTP downloads support authentication via ``~/.netrc`` (or a custom
-    netrc file).  Credentials matching the download URL hostname are
-    sent as HTTP Basic authentication headers.
+    HTTP downloads support authentication via explicit credentials or
+    ``~/.netrc`` (or a custom netrc file).  Explicit credentials take
+    precedence over netrc.
 
     :param output_dir: Local directory to create the compose layout
     :param images: :class:`~productmd.images.Images` instance
@@ -661,6 +674,9 @@ def localize_compose(
         :class:`DownloadEvent` instances for progress tracking
     :param netrc_file: Path to a netrc file for HTTP credential lookup.
         When ``None``, the standard ``~/.netrc`` is used.
+    :param http_username: Username for HTTP Basic authentication.
+        Takes precedence over netrc credentials.
+    :param http_password: Password for HTTP Basic authentication.
     :return: :class:`LocalizeResult` with download statistics
     :raises RuntimeError: If OCI URLs are present but oras-py is not installed
     :raises urllib.error.URLError: If a download fails and fail_fast is True
@@ -700,7 +716,16 @@ def localize_compose(
         # Sequential downloads
         for task in download_tasks:
             try:
-                _download_https(task.url, task.dest_path, retries, progress_callback, task.rel_path, netrc_file)
+                _download_https(
+                    task.url,
+                    task.dest_path,
+                    retries,
+                    progress_callback,
+                    task.rel_path,
+                    netrc_file,
+                    http_username,
+                    http_password,
+                )
                 # Verify checksum after download
                 if verify_checksums and task.location is not None and task.location.checksum is not None:
                     if not task.location.verify(task.dest_path):
@@ -726,6 +751,8 @@ def localize_compose(
                     progress_callback,
                     task.rel_path,
                     netrc_file,
+                    http_username,
+                    http_password,
                 )
                 future_to_task[future] = task
 
