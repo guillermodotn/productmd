@@ -1,10 +1,12 @@
 """``productmd localize`` subcommand — download distributed v2.0 compose.
 
-Supports both HTTPS/HTTP and OCI registry downloads.  OCI downloads
-require the ``oras-py`` package (``pip install productmd[oci]``).
-Authentication supports Docker and Podman credential stores.
+Supports both HTTPS/HTTP and OCI registry downloads.  HTTP downloads
+support authentication via ``~/.netrc``.  OCI downloads require the
+``oras-py`` package (``pip install productmd[oci]``) and support
+Docker and Podman credential stores.
 """
 
+import os
 import sys
 
 from productmd.cli import add_input_args, load_metadata, print_error
@@ -65,6 +67,11 @@ def register(subparsers: object) -> None:
         default=True,
         help="Continue downloading after failures (default: stop on first)",
     )
+    parser.add_argument(
+        "--netrc-file",
+        default=os.environ.get("PRODUCTMD_NETRC_FILE"),
+        help=("Path to a netrc file for HTTP credential lookup (default: ~/.netrc). Can also be set via PRODUCTMD_NETRC_FILE env var."),
+    )
     add_input_args(parser)
     parser.set_defaults(func=run)
 
@@ -91,6 +98,7 @@ def run(args: object) -> None:
             retries=args.retries,
             fail_fast=args.fail_fast,
             progress_callback=progress_callback,
+            netrc_file=args.netrc_file,
             **metadata,
         )
     finally:
