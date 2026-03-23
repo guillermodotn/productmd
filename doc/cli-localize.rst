@@ -4,7 +4,7 @@ productmd-localize
 Synopsis
 --------
 
-**productmd localize** **--output** *DIR* [**--parallel-downloads** *N*] [**--no-verify-checksums**] [**--skip-existing**] [**--retries** *N*] [**--no-fail-fast**] *input*
+**productmd localize** **--output** *DIR* [**--parallel-downloads** *N*] [**--no-verify-checksums**] [**--skip-existing**] [**--retries** *N*] [**--no-fail-fast**] [**--http-token** *TOKEN*] [**--http-username** *USER* **--http-password** *PASS*] [**--netrc-file** *PATH*] *input*
 
 Description
 -----------
@@ -55,6 +55,57 @@ Options
 
 *input*
     Path to a v2.0 metadata file or compose directory.  Auto-detected.
+
+HTTP Authentication
+-------------------
+
+HTTP downloads support authentication for accessing protected content
+servers (e.g. Pulp).  Three mechanisms are available, resolved in the
+following precedence order (highest first):
+
+1. **Bearer token** — ``--http-token`` or ``$PRODUCTMD_HTTP_TOKEN``
+2. **Basic credentials** — ``--http-username`` + ``--http-password``
+   (or ``$PRODUCTMD_HTTP_PASSWORD``)
+3. **Netrc** — automatic lookup from ``~/.netrc`` (or ``--netrc-file``)
+
+Only one of Bearer token or Basic credentials may be specified.
+Providing both ``--http-token`` and ``--http-username``/``--http-password``
+is an error.
+
+When no explicit credentials are given, the tool automatically checks
+``~/.netrc`` for entries matching the download URL hostname.  This is
+transparent and requires no CLI flags.
+
+**--http-token** *TOKEN*
+    Bearer token for HTTP authentication.  Sent as
+    ``Authorization: Bearer <TOKEN>``.  Useful for Keycloak/OAuth2-based
+    Pulp deployments.  Can also be set via the ``PRODUCTMD_HTTP_TOKEN``
+    environment variable.  Mutually exclusive with
+    ``--http-username``/``--http-password``.
+
+**--http-username** *USER*
+    Username for HTTP Basic authentication.  Must be combined with
+    ``--http-password``.  Takes precedence over netrc credentials.
+
+**--http-password** *PASS*
+    Password for HTTP Basic authentication.  Can also be set via the
+    ``PRODUCTMD_HTTP_PASSWORD`` environment variable to avoid exposing
+    the password in shell history.
+
+**--netrc-file** *PATH*
+    Path to a netrc file for credential lookup.  Default: ``~/.netrc``.
+    Can also be set via the ``PRODUCTMD_NETRC_FILE`` environment variable.
+    Useful in CI/automation or containerized environments where
+    ``~/.netrc`` is not available.
+
+The netrc file uses the standard format::
+
+    machine pulp.example.com
+    login admin
+    password secret123
+
+Credentials are matched by hostname.  Different hosts can have
+different credentials in the same netrc file.
 
 OCI Support
 -----------
@@ -107,6 +158,28 @@ Continue after failures::
     productmd localize \
         --output /mnt/local \
         --no-fail-fast \
+        images.json
+
+Download with a Bearer token::
+
+    productmd localize \
+        --output /mnt/local \
+        --http-token eyJhbGciOiJSUzI1NiIs... \
+        images.json
+
+Download with Basic auth (password via env var)::
+
+    export PRODUCTMD_HTTP_PASSWORD=secret123
+    productmd localize \
+        --output /mnt/local \
+        --http-username admin \
+        images.json
+
+Download using a custom netrc file::
+
+    productmd localize \
+        --output /mnt/local \
+        --netrc-file /run/secrets/netrc \
         images.json
 
 See Also
