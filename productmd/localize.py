@@ -130,6 +130,39 @@ def _get_netrc_auth_header(
     return None
 
 
+def _build_auth_header(
+    url: str,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    token: Optional[str] = None,
+    netrc_file: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Resolve an HTTP Authorization header value.
+
+    Determines the appropriate authorization header using the following
+    precedence (highest first):
+
+    1. Bearer token (``token``)
+    2. Explicit Basic credentials (``username`` + ``password``)
+    3. Netrc lookup by URL hostname
+
+    :param url: URL whose hostname is used for netrc lookup
+    :param username: Username for HTTP Basic authentication
+    :param password: Password for HTTP Basic authentication
+    :param token: Bearer token for HTTP authentication
+    :param netrc_file: Path to a netrc file (default: ``~/.netrc``)
+    :return: Authorization header value, or ``None`` if no credentials
+        are available
+    """
+    if token is not None:
+        return f"Bearer {token}"
+    if username is not None and password is not None:
+        credentials = b64encode(f"{username}:{password}".encode()).decode()
+        return f"Basic {credentials}"
+    return _get_netrc_auth_header(url, netrc_file)
+
+
 #: Default chunk size for streaming downloads (8 KB)
 _CHUNK_SIZE = 8192
 
@@ -156,6 +189,7 @@ def _download_https(
     netrc_file: Optional[str] = None,
     username: Optional[str] = None,
     password: Optional[str] = None,
+    token: Optional[str] = None,
 ) -> None:
     """
     Download a file from an HTTP(S) URL to a local path.
@@ -164,10 +198,9 @@ def _download_https(
     atomically to avoid partial files.  Retries on failure with
     exponential backoff.
 
-    When *username* and *password* are provided, they are used for HTTP
-    Basic authentication and take precedence over netrc credentials.
-    Otherwise, when ``~/.netrc`` (or *netrc_file*) contains credentials
-    matching the URL hostname, those are used instead.
+    Authentication is resolved via :func:`_build_auth_header` with the
+    following precedence: Bearer *token* > explicit *username*/*password*
+    (Basic) > netrc lookup.
 
     :param url: HTTP(S) URL to download from
     :param dest_path: Local file path to save to
@@ -177,8 +210,9 @@ def _download_https(
     :param netrc_file: Path to a netrc file for credential lookup.
         When ``None``, the standard ``~/.netrc`` is used.
     :param username: Username for HTTP Basic authentication.
-        Takes precedence over netrc credentials.
     :param password: Password for HTTP Basic authentication.
+    :param token: Bearer token for HTTP authentication.
+        Takes precedence over Basic credentials and netrc.
     :raises urllib.error.URLError: If all retry attempts fail
     """
     parent_dir = os.path.dirname(dest_path)
@@ -189,13 +223,9 @@ def _download_https(
     last_error = None
 
     headers = _get_default_headers()
-    if username is not None and password is not None:
-        credentials = b64encode(f"{username}:{password}".encode()).decode()
-        headers["Authorization"] = f"Basic {credentials}"
-    else:
-        auth_header = _get_netrc_auth_header(url, netrc_file)
-        if auth_header:
-            headers["Authorization"] = auth_header
+    auth_header = _build_auth_header(url, username, password, token, netrc_file)
+    if auth_header:
+        headers["Authorization"] = auth_header
 
     for attempt in range(retries + 1):
         try:
@@ -642,6 +672,7 @@ def localize_compose(
     netrc_file: Optional[str] = None,
     http_username: Optional[str] = None,
     http_password: Optional[str] = None,
+    http_token: Optional[str] = None,
 ) -> LocalizeResult:
     """
     Localize a distributed v2.0 compose to local storage.
@@ -654,9 +685,8 @@ def localize_compose(
     require ``oras-py`` (``pip install productmd[oci]``).  Authentication
     supports Docker and Podman credential stores.
 
-    HTTP downloads support authentication via explicit credentials or
-    ``~/.netrc`` (or a custom netrc file).  Explicit credentials take
-    precedence over netrc.
+    HTTP downloads support authentication with the following precedence:
+    Bearer token > explicit Basic credentials > netrc lookup.
 
     :param output_dir: Local directory to create the compose layout
     :param images: :class:`~productmd.images.Images` instance
@@ -675,8 +705,10 @@ def localize_compose(
     :param netrc_file: Path to a netrc file for HTTP credential lookup.
         When ``None``, the standard ``~/.netrc`` is used.
     :param http_username: Username for HTTP Basic authentication.
-        Takes precedence over netrc credentials.
     :param http_password: Password for HTTP Basic authentication.
+    :param http_token: Bearer token for HTTP authentication.
+        Takes precedence over Basic credentials and netrc.
+        Mutually exclusive with ``http_username``/``http_password``.
     :return: :class:`LocalizeResult` with download statistics
     :raises RuntimeError: If OCI URLs are present but oras-py is not installed
     :raises urllib.error.URLError: If a download fails and fail_fast is True
@@ -725,6 +757,7 @@ def localize_compose(
                     netrc_file,
                     http_username,
                     http_password,
+                    http_token,
                 )
                 # Verify checksum after download
                 if verify_checksums and task.location is not None and task.location.checksum is not None:
@@ -753,6 +786,7 @@ def localize_compose(
                     netrc_file,
                     http_username,
                     http_password,
+                    http_token,
                 )
                 future_to_task[future] = task
 

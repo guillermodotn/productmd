@@ -1,9 +1,10 @@
 """``productmd localize`` subcommand — download distributed v2.0 compose.
 
 Supports both HTTPS/HTTP and OCI registry downloads.  HTTP downloads
-support authentication via ``~/.netrc``.  OCI downloads require the
-``oras-py`` package (``pip install productmd[oci]``) and support
-Docker and Podman credential stores.
+support authentication via Bearer token, Basic credentials, or
+``~/.netrc``.  OCI downloads require the ``oras-py`` package
+(``pip install productmd[oci]``) and support Docker and Podman
+credential stores.
 """
 
 import os
@@ -27,6 +28,7 @@ def register(subparsers: object) -> None:
             "Download all remote artifacts from a v2.0 compose, "
             "recreating the standard v1.2 filesystem layout. "
             "Supports HTTPS/HTTP and OCI registry downloads. "
+            "HTTP auth: Bearer token, Basic credentials, or ~/.netrc. "
             "OCI requires oras-py (pip install productmd[oci]). "
             "Writes v1.2 metadata after download."
         ),
@@ -82,6 +84,16 @@ def register(subparsers: object) -> None:
         default=os.environ.get("PRODUCTMD_HTTP_PASSWORD"),
         help=("Password for HTTP Basic authentication. Can also be set via PRODUCTMD_HTTP_PASSWORD env var."),
     )
+    parser.add_argument(
+        "--http-token",
+        default=os.environ.get("PRODUCTMD_HTTP_TOKEN"),
+        help=(
+            "Bearer token for HTTP authentication. "
+            "Takes precedence over Basic credentials and netrc. "
+            "Mutually exclusive with --http-username/--http-password. "
+            "Can also be set via PRODUCTMD_HTTP_TOKEN env var."
+        ),
+    )
     add_input_args(parser)
     parser.set_defaults(func=run)
 
@@ -97,6 +109,10 @@ def run(args: object) -> None:
         print_error(f"No metadata found at {args.input}")
         sys.exit(1)
 
+    if args.http_token and (args.http_username or args.http_password):
+        print_error("--http-token is mutually exclusive with --http-username/--http-password")
+        sys.exit(2)
+
     progress_callback, cleanup = make_progress_callback(parallel=args.parallel_downloads)
 
     try:
@@ -111,6 +127,7 @@ def run(args: object) -> None:
             netrc_file=args.netrc_file,
             http_username=args.http_username,
             http_password=args.http_password,
+            http_token=args.http_token,
             **metadata,
         )
     finally:
