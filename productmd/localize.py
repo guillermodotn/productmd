@@ -6,6 +6,10 @@ v1.2 filesystem layout.  Supports HTTPS/HTTP and OCI registry downloads
 with parallel execution, checksum verification, and configurable error
 handling.
 
+HTTP downloads support authentication via ``~/.netrc`` (or a custom
+netrc file).  Credentials matching the download URL hostname are sent
+as HTTP Basic authentication headers.
+
 OCI registry downloads require the ``oras-py`` package
 (``pip install productmd[oci]``).  Authentication supports both Docker
 and Podman credential stores (``docker login`` / ``podman login``).
@@ -29,13 +33,16 @@ Example::
 """
 
 import logging
+import netrc
 import os
 import time
 import urllib.request
+from base64 import b64encode
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 
 from productmd.common import _get_default_headers
 from productmd.convert import downgrade_to_v1, iter_all_locations
@@ -92,6 +99,37 @@ Result of a localization operation.
 """
 
 
+def _get_netrc_auth_header(
+    url: str,
+    netrc_file: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Look up HTTP Basic auth credentials from a netrc file.
+
+    Searches the netrc file for credentials matching the hostname in
+    *url*.  If found, returns a ``Basic`` Authorization header value.
+
+    :param url: URL whose hostname is used for the netrc lookup
+    :param netrc_file: Path to a netrc file.  When ``None``, the
+        standard ``~/.netrc`` (or ``~/_netrc`` on Windows) is used.
+    :return: ``"Basic <base64>"`` string, or ``None`` if no credentials
+        are found or the netrc file is missing / malformed
+    """
+    try:
+        rc = netrc.netrc(netrc_file)
+        host = urlparse(url).hostname
+        if not host:
+            return None
+        auth = rc.authenticators(host)
+        if auth:
+            login, _, password = auth
+            credentials = b64encode(f"{login}:{password}".encode()).decode()
+            return f"Basic {credentials}"
+    except (FileNotFoundError, netrc.NetrcParseError, OSError) as e:
+        logger.debug("netrc lookup failed: %s", e)
+    return None
+
+
 #: Default chunk size for streaming downloads (8 KB)
 _CHUNK_SIZE = 8192
 
@@ -115,6 +153,7 @@ def _download_https(
     retries: int = 3,
     progress_callback: Optional[Callable] = None,
     filename: str = "",
+    netrc_file: Optional[str] = None,
 ) -> None:
     """
     Download a file from an HTTP(S) URL to a local path.
@@ -123,11 +162,16 @@ def _download_https(
     atomically to avoid partial files.  Retries on failure with
     exponential backoff.
 
+    When *netrc_file* is provided (or ``~/.netrc`` exists), credentials
+    matching the URL hostname are used for HTTP Basic authentication.
+
     :param url: HTTP(S) URL to download from
     :param dest_path: Local file path to save to
     :param retries: Number of retry attempts (default: 3)
     :param progress_callback: Optional callback for progress events
     :param filename: Relative path for progress event reporting
+    :param netrc_file: Path to a netrc file for credential lookup.
+        When ``None``, the standard ``~/.netrc`` is used.
     :raises urllib.error.URLError: If all retry attempts fail
     """
     parent_dir = os.path.dirname(dest_path)
@@ -137,9 +181,14 @@ def _download_https(
     tmp_path = dest_path + ".tmp"
     last_error = None
 
+    headers = _get_default_headers()
+    auth_header = _get_netrc_auth_header(url, netrc_file)
+    if auth_header:
+        headers["Authorization"] = auth_header
+
     for attempt in range(retries + 1):
         try:
-            req = urllib.request.Request(url, headers=_get_default_headers())
+            req = urllib.request.Request(url, headers=headers)
             response = urllib.request.urlopen(req)
             content_length = response.headers.get("Content-Length")
             total = int(content_length) if content_length else None
@@ -579,6 +628,7 @@ def localize_compose(
     fail_fast: bool = True,
     retries: int = 3,
     progress_callback: Optional[Callable] = None,
+    netrc_file: Optional[str] = None,
 ) -> LocalizeResult:
     """
     Localize a distributed v2.0 compose to local storage.
@@ -590,6 +640,10 @@ def localize_compose(
     Supports both HTTPS/HTTP and OCI registry downloads.  OCI downloads
     require ``oras-py`` (``pip install productmd[oci]``).  Authentication
     supports Docker and Podman credential stores.
+
+    HTTP downloads support authentication via ``~/.netrc`` (or a custom
+    netrc file).  Credentials matching the download URL hostname are
+    sent as HTTP Basic authentication headers.
 
     :param output_dir: Local directory to create the compose layout
     :param images: :class:`~productmd.images.Images` instance
@@ -605,6 +659,8 @@ def localize_compose(
     :param retries: Number of retry attempts per download (default: 3)
     :param progress_callback: Optional callable receiving
         :class:`DownloadEvent` instances for progress tracking
+    :param netrc_file: Path to a netrc file for HTTP credential lookup.
+        When ``None``, the standard ``~/.netrc`` is used.
     :return: :class:`LocalizeResult` with download statistics
     :raises RuntimeError: If OCI URLs are present but oras-py is not installed
     :raises urllib.error.URLError: If a download fails and fail_fast is True
@@ -644,7 +700,7 @@ def localize_compose(
         # Sequential downloads
         for task in download_tasks:
             try:
-                _download_https(task.url, task.dest_path, retries, progress_callback, task.rel_path)
+                _download_https(task.url, task.dest_path, retries, progress_callback, task.rel_path, netrc_file)
                 # Verify checksum after download
                 if verify_checksums and task.location is not None and task.location.checksum is not None:
                     if not task.location.verify(task.dest_path):
@@ -669,6 +725,7 @@ def localize_compose(
                     retries,
                     progress_callback,
                     task.rel_path,
+                    netrc_file,
                 )
                 future_to_task[future] = task
 
