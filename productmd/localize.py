@@ -130,6 +130,19 @@ def _get_netrc_auth_header(
     return None
 
 
+def _validate_credential(value: str, name: str) -> str:
+    """Reject credential values containing CR or LF to prevent header injection.
+
+    :param value: The credential value to validate
+    :param name: Human-readable name for error messages (e.g., "token")
+    :return: The value unchanged if valid
+    :raises ValueError: If the value contains CR or LF characters
+    """
+    if "\r" in value or "\n" in value:
+        raise ValueError(f"{name} contains illegal newline characters")
+    return value
+
+
 def _build_auth_header(
     url: str,
     username: Optional[str] = None,
@@ -154,13 +167,30 @@ def _build_auth_header(
     :param netrc_file: Path to a netrc file (default: ``~/.netrc``)
     :return: Authorization header value, or ``None`` if no credentials
         are available
+    :raises ValueError: If any credential contains CR or LF characters
     """
     if token is not None:
+        _validate_credential(token, "token")
         return f"Bearer {token}"
     if username is not None and password is not None:
+        _validate_credential(username, "username")
+        _validate_credential(password, "password")
         credentials = b64encode(f"{username}:{password}".encode()).decode()
         return f"Basic {credentials}"
     return _get_netrc_auth_header(url, netrc_file)
+
+
+def _effective_port(parsed):
+    """Return the effective port for a parsed URL.
+
+    Resolves ``None`` (no explicit port) to the default port for the
+    scheme: 443 for HTTPS, 80 for HTTP.  This prevents false mismatches
+    when comparing ``https://host/path`` (port=None) with
+    ``https://host:443/path`` (port=443).
+    """
+    if parsed.port is not None:
+        return parsed.port
+    return 443 if parsed.scheme == "https" else 80
 
 
 class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -176,8 +206,8 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         if new_req is not None:
             original = urlparse(req.full_url)
             redirect = urlparse(new_req.full_url)
-            original_origin = (original.scheme, original.hostname, original.port)
-            redirect_origin = (redirect.scheme, redirect.hostname, redirect.port)
+            original_origin = (original.scheme, original.hostname, _effective_port(original))
+            redirect_origin = (redirect.scheme, redirect.hostname, _effective_port(redirect))
             if original_origin != redirect_origin:
                 new_req.remove_header("Authorization")
                 logger.debug(
@@ -743,7 +773,15 @@ def localize_compose(
     :return: :class:`LocalizeResult` with download statistics
     :raises RuntimeError: If OCI URLs are present but oras-py is not installed
     :raises urllib.error.URLError: If a download fails and fail_fast is True
+    :raises ValueError: If auth parameters are invalid (e.g., username
+        without password, or token with username/password)
     """
+    # Validate auth parameters
+    if (http_username is None) != (http_password is None):
+        raise ValueError("http_username and http_password must be provided together")
+    if http_token and (http_username or http_password):
+        raise ValueError("http_token is mutually exclusive with http_username/http_password")
+
     # Collect all remote download tasks
     http_tasks, oci_tasks = _collect_download_tasks(
         output_dir,

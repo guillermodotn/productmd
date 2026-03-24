@@ -21,6 +21,7 @@ from productmd.localize import (
     _get_netrc_auth_header,
     _should_skip,
     _should_skip_oci,
+    _validate_credential,
     localize_compose,
 )
 from productmd.location import FileEntry, Location
@@ -1467,3 +1468,174 @@ class TestSafeRedirectHandler:
 
         assert new_req is not None
         assert new_req.get_header("Authorization") is None
+
+    def test_keeps_auth_on_default_port_redirect(self):
+        """Test that https://host → https://host:443 is treated as same origin."""
+        handler = _SafeRedirectHandler()
+
+        new_req = self._redirect(
+            handler,
+            "https://pulp.example.com/file.rpm",
+            "https://pulp.example.com:443/file.rpm",
+            auth_header="Basic abc123",
+        )
+
+        assert new_req is not None
+        assert new_req.get_header("Authorization") == "Basic abc123"
+
+    def test_keeps_auth_on_default_http_port_redirect(self):
+        """Test that http://host → http://host:80 is treated as same origin."""
+        handler = _SafeRedirectHandler()
+
+        new_req = self._redirect(
+            handler,
+            "http://pulp.example.com/file.rpm",
+            "http://pulp.example.com:80/file.rpm",
+            auth_header="Bearer my-token",
+        )
+
+        assert new_req is not None
+        assert new_req.get_header("Authorization") == "Bearer my-token"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Credential validation
+# ---------------------------------------------------------------------------
+
+
+class TestValidateCredential:
+    """Tests for _validate_credential header injection prevention."""
+
+    def test_valid_credential(self):
+        """Normal credential values pass through unchanged."""
+        assert _validate_credential("admin", "username") == "admin"
+        assert _validate_credential("secret123", "password") == "secret123"
+        assert _validate_credential("eyJhbGciOiJSUzI1NiIs", "token") == "eyJhbGciOiJSUzI1NiIs"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "token\nevil",
+            "token\revil",
+            "token\r\nevil-header: injected",
+        ],
+    )
+    def test_rejects_newline_characters(self, value):
+        """Credentials with CR, LF, or CRLF are rejected."""
+        with pytest.raises(ValueError, match="newline"):
+            _validate_credential(value, "token")
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"token": "bad\ntoken"},
+            {"username": "bad\nuser", "password": "pass"},
+            {"username": "user", "password": "bad\npass"},
+        ],
+    )
+    def test_build_auth_header_rejects_bad_credentials(self, kwargs):
+        """_build_auth_header raises on any credential with newlines."""
+        with pytest.raises(ValueError, match="newline"):
+            _build_auth_header("https://example.com", **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Library-level auth validation
+# ---------------------------------------------------------------------------
+
+
+class TestLocalizeComposeAuthValidation:
+    """Tests for auth parameter validation in localize_compose."""
+
+    def test_username_without_password_raises(self):
+        """localize_compose raises ValueError when username is given without password."""
+        with pytest.raises(ValueError, match="must be provided together"):
+            localize_compose(
+                output_dir="/tmp/test",
+                http_username="admin",
+            )
+
+    def test_password_without_username_raises(self):
+        """localize_compose raises ValueError when password is given without username."""
+        with pytest.raises(ValueError, match="must be provided together"):
+            localize_compose(
+                output_dir="/tmp/test",
+                http_password="secret",
+            )
+
+    def test_token_with_username_raises(self):
+        """localize_compose raises ValueError when token and username are both given."""
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            localize_compose(
+                output_dir="/tmp/test",
+                http_token="my-token",
+                http_username="admin",
+                http_password="secret",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Tests: Netrc default entry
+# ---------------------------------------------------------------------------
+
+
+class TestNetrcDefaultEntry:
+    """Tests for netrc 'default' machine entry."""
+
+    def test_netrc_default_entry_matches(self, tmp_path):
+        """Test that the netrc 'default' entry matches any hostname."""
+        netrc_file = tmp_path / ".netrc"
+        netrc_file.write_text("default\nlogin fallback-user\npassword fallback-pass\n")
+
+        result = _get_netrc_auth_header("https://any-host.example.com/file.rpm", str(netrc_file))
+
+        assert result is not None
+        import base64
+
+        decoded = base64.b64decode(result.split(" ", 1)[1]).decode()
+        assert decoded == "fallback-user:fallback-pass"
+
+    def test_netrc_specific_overrides_default(self, tmp_path):
+        """Test that a specific machine entry takes precedence over default."""
+        netrc_file = tmp_path / ".netrc"
+        netrc_file.write_text(
+            "machine pulp.example.com\nlogin specific-user\npassword specific-pass\n\n"
+            "default\nlogin fallback-user\npassword fallback-pass\n"
+        )
+
+        result = _get_netrc_auth_header("https://pulp.example.com/file.rpm", str(netrc_file))
+
+        assert result is not None
+        import base64
+
+        decoded = base64.b64decode(result.split(" ", 1)[1]).decode()
+        assert decoded == "specific-user:specific-pass"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Parallel downloads with auth
+# ---------------------------------------------------------------------------
+
+
+class TestParallelDownloadsAuth:
+    """Tests for auth in parallel download path."""
+
+    @patch("productmd.localize.urllib.request.urlopen")
+    def test_parallel_downloads_send_auth(self, mock_urlopen, tmp_path):
+        """Test that auth headers are sent when using parallel downloads."""
+        mock_urlopen.return_value = _mock_urlopen(b"x" * 512)
+        images = _create_images_v2()
+
+        localize_compose(
+            output_dir=str(tmp_path),
+            images=images,
+            parallel_downloads=2,
+            verify_checksums=False,
+            http_username="admin",
+            http_password="secret",
+        )
+
+        # All calls should have the auth header
+        for call in mock_urlopen.call_args_list:
+            req = call[0][0]
+            assert req.get_header("Authorization").startswith("Basic ")

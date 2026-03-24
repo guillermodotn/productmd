@@ -70,7 +70,16 @@ following precedence order (highest first):
 
 Only one of Bearer token or Basic credentials may be specified.
 Providing both ``--http-token`` and ``--http-username``/``--http-password``
-is an error.
+is an error.  Both ``--http-username`` and ``--http-password`` must be
+provided together.
+
+.. note::
+
+   When using ``--http-token`` or ``--http-username``/``--http-password``,
+   the credentials are sent to **all** HTTP download hosts referenced in
+   the compose metadata.  If your compose references multiple hosts, use
+   ``~/.netrc`` instead — it resolves credentials per hostname
+   automatically.
 
 When no explicit credentials are given, the tool automatically checks
 ``~/.netrc`` for entries matching the download URL hostname.  This is
