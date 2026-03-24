@@ -113,6 +113,14 @@ def run(args: object) -> None:
         print_error("--http-token is mutually exclusive with --http-username/--http-password")
         sys.exit(2)
 
+    if args.http_username and not args.http_password:
+        print_error("--http-username requires --http-password")
+        sys.exit(2)
+
+    if args.http_password and not args.http_username:
+        print_error("--http-password requires --http-username")
+        sys.exit(2)
+
     progress_callback, cleanup = make_progress_callback(parallel=args.parallel_downloads)
 
     try:
