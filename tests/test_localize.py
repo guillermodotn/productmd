@@ -1,4 +1,9 @@
-"""Tests for the core localization tool (download, skip, compose, dedup)."""
+"""Tests for the core localization tool (download, skip, compose, dedup).
+
+See also:
+- test_localize_oci.py  -- OCI-specific skip, integration, and parallel tests
+- test_localize_auth.py -- HTTP authentication (netrc, Basic, Bearer, redirect)
+"""
 
 import io
 import os

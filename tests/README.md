@@ -30,7 +30,9 @@ tests/
 │   ├── test_version.py          # Version constants and utilities
 │   ├── test_location.py         # Location, FileEntry, checksum utilities
 │   ├── test_convert.py          # Conversion utilities (upgrade/downgrade/iter)
-│   ├── test_localize.py         # Localization tool (download, verify, skip)
+│   ├── test_localize.py         # Localization: core download, skip, compose, dedup
+│   ├── test_localize_oci.py     # Localization: OCI skip, integration, parallel
+│   ├── test_localize_auth.py    # Localization: HTTP auth (netrc, Basic, Bearer, redirect)
 │   ├── test_oci.py              # OCI download utilities (requires oras-py)
 │   └── test_cli.py              # CLI subcommands and progress display
 │
