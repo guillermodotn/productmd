@@ -163,6 +163,36 @@ def _build_auth_header(
     return _get_netrc_auth_header(url, netrc_file)
 
 
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Redirect handler that strips Authorization on cross-origin redirects.
+
+    Prevents credential leakage when a server (e.g. Pulp) redirects to
+    a different origin (e.g. CDN or S3 presigned URL).  Matches curl's
+    default behavior of comparing scheme + host + port.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is not None:
+            original = urlparse(req.full_url)
+            redirect = urlparse(new_req.full_url)
+            original_origin = (original.scheme, original.hostname, original.port)
+            redirect_origin = (redirect.scheme, redirect.hostname, redirect.port)
+            if original_origin != redirect_origin:
+                new_req.remove_header("Authorization")
+                logger.debug(
+                    "Stripped Authorization header on redirect from %s to %s",
+                    req.full_url,
+                    newurl,
+                )
+        return new_req
+
+
+# Install the safe redirect handler globally so that all urlopen() calls
+# in this module automatically strip Authorization on cross-origin redirects.
+urllib.request.install_opener(urllib.request.build_opener(_SafeRedirectHandler))
+
+
 #: Default chunk size for streaming downloads (8 KB)
 _CHUNK_SIZE = 8192
 
@@ -200,7 +230,8 @@ def _download_https(
 
     Authentication is resolved via :func:`_build_auth_header` with the
     following precedence: Bearer *token* > explicit *username*/*password*
-    (Basic) > netrc lookup.
+    (Basic) > netrc lookup.  Authorization headers are automatically
+    stripped on cross-origin redirects to prevent credential leakage.
 
     :param url: HTTP(S) URL to download from
     :param dest_path: Local file path to save to

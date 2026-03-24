@@ -107,6 +107,13 @@ The netrc file uses the standard format::
 Credentials are matched by hostname.  Different hosts can have
 different credentials in the same netrc file.
 
+.. note::
+
+   Authorization headers are automatically stripped when an HTTP
+   redirect points to a different origin (scheme, host, or port),
+   preventing credential leakage to third-party servers such as CDNs
+   or S3 presigned URLs.  This matches curl's default behavior.
+
 OCI Support
 -----------
 

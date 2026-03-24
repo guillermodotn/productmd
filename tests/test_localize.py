@@ -1,7 +1,9 @@
 """Tests for the localization tool (localize_compose, _download_https)."""
 
+import http.client
 import io
 import os
+import urllib.request
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,6 +13,7 @@ from productmd.localize import (
     HttpTask,
     LocalizeResult,
     OciTask,
+    _SafeRedirectHandler,
     _build_auth_header,
     _deduplicate_http_tasks,
     _download_https,
@@ -1377,3 +1380,90 @@ class TestDownloadHttpsAuth:
 
         req = mock_urlopen.call_args[0][0]
         assert req.get_header("Authorization") == "Bearer my-bearer-token"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Safe Redirect Handler
+# ---------------------------------------------------------------------------
+
+
+class TestSafeRedirectHandler:
+    """Tests for _SafeRedirectHandler cross-origin auth stripping."""
+
+    def _redirect(self, handler, orig_url, new_url, auth_header=None):
+        """Helper to invoke redirect_request with minimal boilerplate."""
+        req = urllib.request.Request(orig_url)
+        if auth_header:
+            req.add_header("Authorization", auth_header)
+        headers = http.client.HTTPMessage()
+        fp = io.BytesIO(b"")
+        return handler.redirect_request(req, fp, 302, "Found", headers, new_url)
+
+    def test_strips_auth_on_cross_origin_redirect(self):
+        """Test that Authorization is removed when redirecting to a different host."""
+        handler = _SafeRedirectHandler()
+
+        new_req = self._redirect(
+            handler,
+            "https://pulp.example.com/repo/file.rpm",
+            "https://cdn.example.com/cached-file.rpm",
+            auth_header="Basic abc123",
+        )
+
+        assert new_req is not None
+        assert new_req.get_header("Authorization") is None
+
+    def test_keeps_auth_on_same_origin_redirect(self):
+        """Test that Authorization is preserved when redirecting to the same origin."""
+        handler = _SafeRedirectHandler()
+
+        new_req = self._redirect(
+            handler,
+            "https://pulp.example.com/repo/file.rpm",
+            "https://pulp.example.com/different/path.rpm",
+            auth_header="Basic abc123",
+        )
+
+        assert new_req is not None
+        assert new_req.get_header("Authorization") == "Basic abc123"
+
+    def test_strips_auth_on_scheme_downgrade(self):
+        """Test that Authorization is removed on HTTPS -> HTTP downgrade."""
+        handler = _SafeRedirectHandler()
+
+        new_req = self._redirect(
+            handler,
+            "https://pulp.example.com/file.rpm",
+            "http://pulp.example.com/file.rpm",
+            auth_header="Bearer my-token",
+        )
+
+        assert new_req is not None
+        assert new_req.get_header("Authorization") is None
+
+    def test_strips_auth_on_port_change(self):
+        """Test that Authorization is removed when the port changes."""
+        handler = _SafeRedirectHandler()
+
+        new_req = self._redirect(
+            handler,
+            "https://pulp.example.com:443/file.rpm",
+            "https://pulp.example.com:8443/file.rpm",
+            auth_header="Basic abc123",
+        )
+
+        assert new_req is not None
+        assert new_req.get_header("Authorization") is None
+
+    def test_no_auth_header_no_error(self):
+        """Test that redirects without Authorization header work fine."""
+        handler = _SafeRedirectHandler()
+
+        new_req = self._redirect(
+            handler,
+            "https://pulp.example.com/file.rpm",
+            "https://cdn.example.com/file.rpm",
+        )
+
+        assert new_req is not None
+        assert new_req.get_header("Authorization") is None
