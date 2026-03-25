@@ -402,8 +402,8 @@ class TestDowngradeCommand:
 class TestLocalizeCommand:
     """Tests for the productmd localize subcommand."""
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_basic_localize(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_basic_localize(self, mock_open, tmp_path):
         """Test basic localization downloads files."""
         import io
         from unittest.mock import MagicMock
@@ -411,7 +411,7 @@ class TestLocalizeCommand:
         response = MagicMock()
         response.read = io.BytesIO(b"iso content").read
         response.headers = {"Content-Length": "11"}
-        mock_urlopen.return_value = response
+        mock_open.return_value = response
 
         compose_dir = str(tmp_path / "compose")
         _create_v20_compose(compose_dir)
@@ -431,8 +431,8 @@ class TestLocalizeCommand:
 
         assert exit_code == 0
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_localize_with_compose_dir(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_localize_with_compose_dir(self, mock_open, tmp_path):
         """Test localization using a compose directory as input."""
         import io
         from unittest.mock import MagicMock
@@ -440,7 +440,7 @@ class TestLocalizeCommand:
         response = MagicMock()
         response.read = io.BytesIO(b"iso content").read
         response.headers = {"Content-Length": "11"}
-        mock_urlopen.return_value = response
+        mock_open.return_value = response
 
         compose_dir = str(tmp_path / "compose")
         _create_v20_compose(compose_dir)

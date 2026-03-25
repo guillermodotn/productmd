@@ -1,10 +1,13 @@
 """``productmd localize`` subcommand — download distributed v2.0 compose.
 
-Supports both HTTPS/HTTP and OCI registry downloads.  OCI downloads
-require the ``oras-py`` package (``pip install productmd[oci]``).
-Authentication supports Docker and Podman credential stores.
+Supports both HTTPS/HTTP and OCI registry downloads.  HTTP downloads
+support authentication via Bearer token, Basic credentials, or
+``~/.netrc``.  OCI downloads require the ``oras-py`` package
+(``pip install productmd[oci]``) and support Docker and Podman
+credential stores.
 """
 
+import os
 import sys
 
 from productmd.cli import add_input_args, load_metadata, print_error
@@ -25,6 +28,7 @@ def register(subparsers: object) -> None:
             "Download all remote artifacts from a v2.0 compose, "
             "recreating the standard v1.2 filesystem layout. "
             "Supports HTTPS/HTTP and OCI registry downloads. "
+            "HTTP auth: Bearer token, Basic credentials, or ~/.netrc. "
             "OCI requires oras-py (pip install productmd[oci]). "
             "Writes v1.2 metadata after download."
         ),
@@ -65,6 +69,21 @@ def register(subparsers: object) -> None:
         default=True,
         help="Continue downloading after failures (default: stop on first)",
     )
+    parser.add_argument(
+        "--netrc-file",
+        default=os.environ.get("PRODUCTMD_NETRC_FILE"),
+        help=("Path to a netrc file for HTTP credential lookup (default: ~/.netrc). Can also be set via PRODUCTMD_NETRC_FILE env var."),
+    )
+    parser.add_argument(
+        "--http-username",
+        default=None,
+        help=(
+            "Username for HTTP Basic authentication. "
+            "Password must be set via PRODUCTMD_HTTP_PASSWORD env var. "
+            "Takes precedence over netrc credentials. "
+            "For Bearer token auth, set PRODUCTMD_HTTP_TOKEN env var instead."
+        ),
+    )
     add_input_args(parser)
     parser.set_defaults(func=run)
 
@@ -80,6 +99,21 @@ def run(args: object) -> None:
         print_error(f"No metadata found at {args.input}")
         sys.exit(1)
 
+    http_password = os.environ.get("PRODUCTMD_HTTP_PASSWORD")
+    http_token = os.environ.get("PRODUCTMD_HTTP_TOKEN")
+
+    if http_token and (args.http_username or http_password):
+        print_error("PRODUCTMD_HTTP_TOKEN is mutually exclusive with --http-username/PRODUCTMD_HTTP_PASSWORD")
+        sys.exit(2)
+
+    if args.http_username and not http_password:
+        print_error("--http-username requires PRODUCTMD_HTTP_PASSWORD env var")
+        sys.exit(2)
+
+    if http_password and not args.http_username:
+        print_error("PRODUCTMD_HTTP_PASSWORD requires --http-username")
+        sys.exit(2)
+
     progress_callback, cleanup = make_progress_callback(parallel=args.parallel_downloads)
 
     try:
@@ -91,6 +125,10 @@ def run(args: object) -> None:
             retries=args.retries,
             fail_fast=args.fail_fast,
             progress_callback=progress_callback,
+            netrc_file=args.netrc_file,
+            http_username=args.http_username,
+            http_password=http_password,
+            http_token=http_token,
             **metadata,
         )
     finally:

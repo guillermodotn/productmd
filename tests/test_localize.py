@@ -1,4 +1,9 @@
-"""Tests for the localization tool (localize_compose, _download_https)."""
+"""Tests for the core localization tool (download, skip, compose, dedup).
+
+See also:
+- test_localize_oci.py  -- OCI-specific skip, integration, and parallel tests
+- test_localize_auth.py -- HTTP authentication (netrc, Basic, Bearer, redirect)
+"""
 
 import io
 import os
@@ -10,12 +15,9 @@ from productmd.images import Image, Images
 from productmd.localize import (
     HttpTask,
     LocalizeResult,
-    OciTask,
     _deduplicate_http_tasks,
     _download_https,
-    _download_single_oci,
     _should_skip,
-    _should_skip_oci,
     localize_compose,
 )
 from productmd.location import FileEntry, Location
@@ -110,8 +112,8 @@ def _create_images_v1():
     return im
 
 
-def _mock_urlopen(content=b"fake file content", status=200, content_length=None):
-    """Create a mock response for urllib.request.urlopen."""
+def _mock_response(content=b"fake file content", status=200, content_length=None):
+    """Create a mock HTTP response for _opener.open()."""
     response = MagicMock()
     data = io.BytesIO(content)
     response.read = data.read
@@ -130,10 +132,10 @@ def _mock_urlopen(content=b"fake file content", status=200, content_length=None)
 class TestDownloadHttps:
     """Tests for the _download_https function."""
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_download_creates_file(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_download_creates_file(self, mock_open, tmp_path):
         """Test that download creates the file at the correct path."""
-        mock_urlopen.return_value = _mock_urlopen(b"hello world")
+        mock_open.return_value = _mock_response(b"hello world")
         dest = str(tmp_path / "output" / "test.txt")
 
         _download_https("https://example.com/test.txt", dest, retries=0)
@@ -142,20 +144,20 @@ class TestDownloadHttps:
         with open(dest, "rb") as f:
             assert f.read() == b"hello world"
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_download_creates_parent_dirs(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_download_creates_parent_dirs(self, mock_open, tmp_path):
         """Test that parent directories are created automatically."""
-        mock_urlopen.return_value = _mock_urlopen(b"data")
+        mock_open.return_value = _mock_response(b"data")
         dest = str(tmp_path / "a" / "b" / "c" / "file.rpm")
 
         _download_https("https://example.com/file.rpm", dest, retries=0)
 
         assert os.path.isfile(dest)
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_download_atomic_rename(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_download_atomic_rename(self, mock_open, tmp_path):
         """Test that .tmp file is renamed to final name (no partial files)."""
-        mock_urlopen.return_value = _mock_urlopen(b"content")
+        mock_open.return_value = _mock_response(b"content")
         dest = str(tmp_path / "final.iso")
 
         _download_https("https://example.com/final.iso", dest, retries=0)
@@ -163,16 +165,16 @@ class TestDownloadHttps:
         assert os.path.isfile(dest)
         assert not os.path.exists(dest + ".tmp")
 
-    @patch("productmd.localize.urllib.request.urlopen")
+    @patch("productmd.localize._opener.open")
     @patch("productmd.localize.time.sleep")
-    def test_download_retry_on_failure(self, mock_sleep, mock_urlopen, tmp_path):
+    def test_download_retry_on_failure(self, mock_sleep, mock_open, tmp_path):
         """Test that download retries on failure with exponential backoff."""
         from urllib.error import URLError
 
-        mock_urlopen.side_effect = [
+        mock_open.side_effect = [
             URLError("connection refused"),
             URLError("timeout"),
-            _mock_urlopen(b"success"),
+            _mock_response(b"success"),
         ]
         dest = str(tmp_path / "retried.txt")
 
@@ -183,11 +185,11 @@ class TestDownloadHttps:
             assert f.read() == b"success"
         assert mock_sleep.call_count == 2
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_download_calls_progress_callback(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_download_calls_progress_callback(self, mock_open, tmp_path):
         """Test that progress callback receives correct events."""
         content = b"x" * 100
-        mock_urlopen.return_value = _mock_urlopen(content)
+        mock_open.return_value = _mock_response(content)
         dest = str(tmp_path / "progress.bin")
 
         events = []
@@ -213,16 +215,44 @@ class TestDownloadHttps:
         complete = events[-1]
         assert complete.bytes_downloaded == 100
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_download_all_retries_exhausted(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_download_all_retries_exhausted(self, mock_open, tmp_path):
         """Test that exception is raised when all retries are exhausted."""
         from urllib.error import URLError
 
-        mock_urlopen.side_effect = URLError("permanent failure")
+        mock_open.side_effect = URLError("permanent failure")
         dest = str(tmp_path / "fail.txt")
 
         with pytest.raises(URLError):
             _download_https("https://example.com/fail.txt", dest, retries=1)
+
+    @patch("productmd.localize._opener.open")
+    def test_download_no_retry_on_401(self, mock_open, tmp_path):
+        """Test that 401 errors are raised immediately without retrying."""
+        from urllib.error import HTTPError
+
+        mock_open.side_effect = HTTPError("https://example.com/file.rpm", 401, "Unauthorized", {}, None)
+        dest = str(tmp_path / "auth_fail.txt")
+
+        with pytest.raises(HTTPError) as exc_info:
+            _download_https("https://example.com/file.rpm", dest, retries=3)
+
+        assert exc_info.value.code == 401
+        mock_open.assert_called_once()
+
+    @patch("productmd.localize._opener.open")
+    def test_download_no_retry_on_403(self, mock_open, tmp_path):
+        """Test that 403 errors are raised immediately without retrying."""
+        from urllib.error import HTTPError
+
+        mock_open.side_effect = HTTPError("https://example.com/file.rpm", 403, "Forbidden", {}, None)
+        dest = str(tmp_path / "forbidden.txt")
+
+        with pytest.raises(HTTPError) as exc_info:
+            _download_https("https://example.com/file.rpm", dest, retries=3)
+
+        assert exc_info.value.code == 403
+        mock_open.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -281,10 +311,10 @@ class TestShouldSkip:
 class TestLocalizeCompose:
     """Tests for the localize_compose function."""
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_basic_localize(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_basic_localize(self, mock_open, tmp_path):
         """Test basic localization downloads files and writes v1.2 metadata."""
-        mock_urlopen.return_value = _mock_urlopen(b"iso content")
+        mock_open.return_value = _mock_response(b"iso content")
         output_dir = str(tmp_path / "compose-output")
 
         im = _create_images_v2()
@@ -307,8 +337,8 @@ class TestLocalizeCompose:
         metadata_dir = os.path.join(output_dir, "compose", "metadata")
         assert os.path.isfile(os.path.join(metadata_dir, "images.json"))
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_skip_existing_with_valid_checksum(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_skip_existing_with_valid_checksum(self, mock_open, tmp_path):
         """Test that existing files with valid checksum are skipped."""
         output_dir = str(tmp_path / "compose-output")
 
@@ -343,14 +373,14 @@ class TestLocalizeCompose:
         assert result.skipped == 1
         assert result.downloaded == 0
         # urlopen should not have been called
-        mock_urlopen.assert_not_called()
+        mock_open.assert_not_called()
 
-    @patch("productmd.localize.urllib.request.urlopen")
+    @patch("productmd.localize._opener.open")
     @patch("productmd.localize._should_skip")
-    def test_skip_existing_wrong_checksum_redownloads(self, mock_skip, mock_urlopen, tmp_path):
+    def test_skip_existing_wrong_checksum_redownloads(self, mock_skip, mock_open, tmp_path):
         """Test that files with wrong checksum are re-downloaded when skip returns False."""
         mock_skip.return_value = False  # Simulate checksum mismatch
-        mock_urlopen.return_value = _mock_urlopen(b"correct content")
+        mock_open.return_value = _mock_response(b"correct content")
 
         im = _create_images_v2()
         result = localize_compose(
@@ -473,12 +503,12 @@ class TestLocalizeCompose:
                 images=im,
             )
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_fail_fast_stops_on_error(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_fail_fast_stops_on_error(self, mock_open, tmp_path):
         """Test that fail_fast=True stops on first download failure."""
         from urllib.error import URLError
 
-        mock_urlopen.side_effect = URLError("connection refused")
+        mock_open.side_effect = URLError("connection refused")
 
         im = _create_images_v2()
         rpms = _create_rpms_v2()
@@ -496,15 +526,15 @@ class TestLocalizeCompose:
         # Should not have attempted all downloads
         assert result.downloaded == 0
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_fail_fast_false_continues(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_fail_fast_false_continues(self, mock_open, tmp_path):
         """Test that fail_fast=False continues after errors."""
         from urllib.error import URLError
 
         # First call fails, second succeeds
-        mock_urlopen.side_effect = [
+        mock_open.side_effect = [
             URLError("connection refused"),
-            _mock_urlopen(b"rpm content"),
+            _mock_response(b"rpm content"),
         ]
 
         im = _create_images_v2()
@@ -538,10 +568,10 @@ class TestLocalizeCompose:
         assert result.skipped == 0
         assert result.failed == 0
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_localize_result_counts(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_localize_result_counts(self, mock_open, tmp_path):
         """Test that LocalizeResult has correct counts."""
-        mock_urlopen.return_value = _mock_urlopen(b"data")
+        mock_open.return_value = _mock_response(b"data")
 
         im = _create_images_v2()
         result = localize_compose(
@@ -558,10 +588,10 @@ class TestLocalizeCompose:
         assert result.failed == 0
         assert result.errors == []
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_progress_callback_receives_events(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_progress_callback_receives_events(self, mock_open, tmp_path):
         """Test that progress callback receives download events."""
-        mock_urlopen.return_value = _mock_urlopen(b"file data")
+        mock_open.return_value = _mock_response(b"file data")
 
         im = _create_images_v2()
         events = []
@@ -579,12 +609,12 @@ class TestLocalizeCompose:
         assert "start" in event_types
         assert "complete" in event_types
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_metadata_downgraded_to_v12(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_metadata_downgraded_to_v12(self, mock_open, tmp_path):
         """Test that output metadata is written in v1.2 format."""
         import json
 
-        mock_urlopen.return_value = _mock_urlopen(b"content")
+        mock_open.return_value = _mock_response(b"content")
 
         im = _create_images_v2()
         output_dir = str(tmp_path / "output")
@@ -606,462 +636,6 @@ class TestLocalizeCompose:
         img = data["payload"]["images"]["Server"]["x86_64"][0]
         assert "path" in img
         assert "location" not in img
-
-
-# ---------------------------------------------------------------------------
-# Tests: OCI-specific skip and download logic
-# ---------------------------------------------------------------------------
-
-
-class TestShouldSkipOci:
-    """Tests for the _should_skip_oci function."""
-
-    def test_skip_oci_contents_all_exist(self, tmp_path):
-        """Test skip when all content files exist with valid checksums."""
-        from productmd.location import compute_checksum as cc
-
-        dest_dir = str(tmp_path / "images")
-        os.makedirs(os.path.join(dest_dir, "pxeboot"))
-
-        # Create files
-        vmlinuz = os.path.join(dest_dir, "pxeboot", "vmlinuz")
-        with open(vmlinuz, "wb") as f:
-            f.write(b"kernel content")
-        checksum = cc(vmlinuz, "sha256")
-
-        contents = [
-            FileEntry(file="pxeboot/vmlinuz", size=14, checksum=checksum, layer_digest="sha256:" + "a" * 64),
-        ]
-        task = OciTask(
-            oci_url="oci://registry/repo@sha256:" + "b" * 64,
-            dest_dir=dest_dir,
-            contents=contents,
-            location=Location(url="oci://registry/repo@sha256:" + "b" * 64, local_path="images"),
-            rel_path="images/pxeboot/vmlinuz",
-        )
-
-        assert _should_skip_oci(task, verify_checksums=True)
-
-    def test_no_skip_oci_contents_missing_file(self, tmp_path):
-        """Test no skip when a content file is missing."""
-        dest_dir = str(tmp_path / "images")
-        os.makedirs(dest_dir)
-
-        contents = [
-            FileEntry(file="pxeboot/vmlinuz", size=14, checksum=None, layer_digest="sha256:" + "a" * 64),
-        ]
-        task = OciTask(
-            oci_url="oci://registry/repo@sha256:" + "b" * 64,
-            dest_dir=dest_dir,
-            contents=contents,
-            location=Location(url="oci://registry/repo@sha256:" + "b" * 64, local_path="images"),
-            rel_path="images/pxeboot/vmlinuz",
-        )
-
-        assert not _should_skip_oci(task, verify_checksums=True)
-
-    def test_no_skip_oci_contents_bad_checksum(self, tmp_path):
-        """Test no skip when a content file has wrong checksum."""
-        dest_dir = str(tmp_path / "images")
-        os.makedirs(os.path.join(dest_dir, "pxeboot"))
-
-        vmlinuz = os.path.join(dest_dir, "pxeboot", "vmlinuz")
-        with open(vmlinuz, "wb") as f:
-            f.write(b"kernel content")
-
-        contents = [
-            FileEntry(
-                file="pxeboot/vmlinuz",
-                size=14,
-                checksum="sha256:" + "f" * 64,  # wrong
-                layer_digest="sha256:" + "a" * 64,
-            ),
-        ]
-        task = OciTask(
-            oci_url="oci://registry/repo@sha256:" + "b" * 64,
-            dest_dir=dest_dir,
-            contents=contents,
-            location=Location(url="oci://registry/repo@sha256:" + "b" * 64, local_path="images"),
-            rel_path="images/pxeboot/vmlinuz",
-        )
-
-        assert not _should_skip_oci(task, verify_checksums=True)
-
-    def test_skip_oci_contents_no_verify(self, tmp_path):
-        """Test skip when all content files exist and verify_checksums=False."""
-        dest_dir = str(tmp_path / "images")
-        os.makedirs(os.path.join(dest_dir, "pxeboot"))
-
-        vmlinuz = os.path.join(dest_dir, "pxeboot", "vmlinuz")
-        with open(vmlinuz, "wb") as f:
-            f.write(b"kernel content")
-
-        contents = [
-            FileEntry(
-                file="pxeboot/vmlinuz",
-                size=14,
-                checksum="sha256:" + "f" * 64,  # wrong but not checked
-                layer_digest="sha256:" + "a" * 64,
-            ),
-        ]
-        task = OciTask(
-            oci_url="oci://registry/repo@sha256:" + "b" * 64,
-            dest_dir=dest_dir,
-            contents=contents,
-            location=Location(url="oci://registry/repo@sha256:" + "b" * 64, local_path="images"),
-            rel_path="images/pxeboot/vmlinuz",
-        )
-
-        # Not verified, so existence alone is enough
-        assert _should_skip_oci(task, verify_checksums=False)
-
-    def test_skip_oci_simple_existing_file(self, tmp_path):
-        """Test skip for simple OCI (no contents) when file exists."""
-        # For simple OCI, dest_dir is the compose root and the file
-        # is at dest_dir/local_path
-        dest_dir = str(tmp_path / "compose")
-        os.makedirs(dest_dir)
-        file_path = os.path.join(dest_dir, "output.iso")
-        with open(file_path, "wb") as f:
-            f.write(b"iso content")
-
-        task = OciTask(
-            oci_url="oci://registry/repo@sha256:" + "b" * 64,
-            dest_dir=dest_dir,
-            contents=[],
-            location=Location(url="oci://registry/repo@sha256:" + "b" * 64, local_path="output.iso"),
-            rel_path="output.iso",
-        )
-
-        assert _should_skip_oci(task, verify_checksums=False)
-
-
-class TestOciLocalizeIntegration:
-    """Integration-style tests for OCI localization within localize_compose."""
-
-    @patch("productmd.oci.get_downloader")
-    @patch("productmd.oci.HAS_ORAS", True)
-    def test_oci_download_error_fail_fast(self, mock_get_downloader, tmp_path):
-        """Test that OCI download errors respect fail_fast."""
-        mock_downloader = MagicMock()
-        mock_downloader.download_and_extract.side_effect = RuntimeError("registry unreachable")
-        mock_get_downloader.return_value = mock_downloader
-
-        im = Images()
-        im.header.version = "2.0"
-        im.compose.id = "Test-1.0-20260204.0"
-        im.compose.type = "production"
-        im.compose.date = "20260204"
-        im.compose.respin = 0
-        im.output_version = VERSION_2_0
-
-        img = _make_image(im, "Server/x86_64/iso/boot.iso", 512, "a" * 64)
-        img.location = Location(
-            url="oci://quay.io/fedora/server:41-x86_64@sha256:" + "a" * 64,
-            size=512,
-            checksum="sha256:" + "a" * 64,
-            local_path="Server/x86_64/iso/boot.iso",
-        )
-        im.add("Server", "x86_64", img)
-
-        result = localize_compose(
-            output_dir=str(tmp_path / "output"),
-            images=im,
-            fail_fast=True,
-            verify_checksums=False,
-        )
-
-        assert result.failed == 1
-        assert result.downloaded == 0
-        assert len(result.errors) == 1
-        assert "registry unreachable" in str(result.errors[0][1])
-
-    @patch("productmd.oci.get_downloader")
-    @patch("productmd.oci.HAS_ORAS", True)
-    def test_oci_progress_events(self, mock_get_downloader, tmp_path):
-        """Test that OCI downloads emit progress events."""
-        mock_downloader = MagicMock()
-        mock_get_downloader.return_value = mock_downloader
-
-        im = Images()
-        im.header.version = "2.0"
-        im.compose.id = "Test-1.0-20260204.0"
-        im.compose.type = "production"
-        im.compose.date = "20260204"
-        im.compose.respin = 0
-        im.output_version = VERSION_2_0
-
-        img = _make_image(im, "Server/x86_64/iso/boot.iso", 512, "a" * 64)
-        img.location = Location(
-            url="oci://quay.io/fedora/server:41-x86_64@sha256:" + "a" * 64,
-            size=512,
-            checksum="sha256:" + "a" * 64,
-            local_path="Server/x86_64/iso/boot.iso",
-        )
-        im.add("Server", "x86_64", img)
-
-        events = []
-        localize_compose(
-            output_dir=str(tmp_path / "output"),
-            images=im,
-            verify_checksums=False,
-            progress_callback=events.append,
-        )
-
-        event_types = [e.event_type for e in events]
-        assert "start" in event_types
-        assert "complete" in event_types
-
-    @patch("productmd.oci.get_downloader")
-    @patch("productmd.oci.HAS_ORAS", True)
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_mixed_http_and_oci_downloads(self, mock_urlopen, mock_get_downloader, tmp_path):
-        """Test that a compose with both HTTP and OCI URLs works."""
-        mock_urlopen.return_value = _mock_urlopen(b"http content")
-        mock_downloader = MagicMock()
-        mock_get_downloader.return_value = mock_downloader
-
-        im = Images()
-        im.header.version = "2.0"
-        im.compose.id = "Test-1.0-20260204.0"
-        im.compose.type = "production"
-        im.compose.date = "20260204"
-        im.compose.respin = 0
-        im.output_version = VERSION_2_0
-
-        # HTTP image
-        img_http = _make_image(im, "Server/x86_64/iso/boot.iso", 512, "a" * 64)
-        img_http.location = Location(
-            url="https://cdn.example.com/Server/x86_64/iso/boot.iso",
-            size=512,
-            checksum="sha256:" + "a" * 64,
-            local_path="Server/x86_64/iso/boot.iso",
-        )
-        im.add("Server", "x86_64", img_http)
-
-        # OCI image
-        img_oci = _make_image(im, "Server/aarch64/iso/boot.iso", 1024, "b" * 64)
-        img_oci.arch = "aarch64"
-        img_oci.location = Location(
-            url="oci://quay.io/fedora/server:41-aarch64@sha256:" + "b" * 64,
-            size=1024,
-            checksum="sha256:" + "b" * 64,
-            local_path="Server/aarch64/iso/boot.iso",
-        )
-        im.add("Server", "aarch64", img_oci)
-
-        result = localize_compose(
-            output_dir=str(tmp_path / "output"),
-            images=im,
-            parallel_downloads=1,
-            verify_checksums=False,
-            retries=0,
-        )
-
-        # 1 HTTP + 1 OCI
-        assert result.downloaded == 2
-        assert result.failed == 0
-        mock_urlopen.assert_called_once()
-        mock_downloader.download_and_extract.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# Tests: Parallel OCI downloads
-# ---------------------------------------------------------------------------
-
-
-class TestOciParallelDownloads:
-    """Tests for parallel OCI download execution."""
-
-    @patch("productmd.oci.get_downloader")
-    @patch("productmd.oci.HAS_ORAS", True)
-    def test_parallel_multiple_oci_tasks(self, mock_get_downloader, tmp_path):
-        """Test that multiple OCI tasks are all downloaded in parallel mode."""
-        mock_downloader = MagicMock()
-        mock_get_downloader.return_value = mock_downloader
-
-        im = Images()
-        im.header.version = "2.0"
-        im.compose.id = "Test-1.0-20260204.0"
-        im.compose.type = "production"
-        im.compose.date = "20260204"
-        im.compose.respin = 0
-        im.output_version = VERSION_2_0
-
-        # Create 3 OCI images on different arches
-        for arch, hex_char in [("x86_64", "a"), ("aarch64", "b"), ("s390x", "c")]:
-            img = _make_image(im, f"Server/{arch}/iso/boot.iso", 512, hex_char * 64)
-            img.arch = arch
-            img.location = Location(
-                url=f"oci://quay.io/fedora/server:41-{arch}@sha256:" + hex_char * 64,
-                size=512,
-                checksum="sha256:" + hex_char * 64,
-                local_path=f"Server/{arch}/iso/boot.iso",
-            )
-            im.add("Server", arch, img)
-
-        result = localize_compose(
-            output_dir=str(tmp_path / "output"),
-            images=im,
-            parallel_downloads=3,
-            verify_checksums=False,
-        )
-
-        assert result.downloaded == 3
-        assert result.failed == 0
-        # Each task creates its own downloader (thread-safety)
-        assert mock_get_downloader.call_count == 3
-        assert mock_downloader.download_and_extract.call_count == 3
-
-    @patch("productmd.oci.get_downloader")
-    @patch("productmd.oci.HAS_ORAS", True)
-    def test_parallel_oci_fail_fast_stops(self, mock_get_downloader, tmp_path):
-        """Test that fail_fast cancels remaining parallel OCI tasks on error."""
-        mock_downloader = MagicMock()
-        mock_downloader.download_and_extract.side_effect = RuntimeError("pull failed")
-        mock_get_downloader.return_value = mock_downloader
-
-        im = Images()
-        im.header.version = "2.0"
-        im.compose.id = "Test-1.0-20260204.0"
-        im.compose.type = "production"
-        im.compose.date = "20260204"
-        im.compose.respin = 0
-        im.output_version = VERSION_2_0
-
-        for arch, hex_char in [("x86_64", "a"), ("aarch64", "b"), ("s390x", "c")]:
-            img = _make_image(im, f"Server/{arch}/iso/boot.iso", 512, hex_char * 64)
-            img.arch = arch
-            img.location = Location(
-                url=f"oci://quay.io/fedora/server:41-{arch}@sha256:" + hex_char * 64,
-                size=512,
-                checksum="sha256:" + hex_char * 64,
-                local_path=f"Server/{arch}/iso/boot.iso",
-            )
-            im.add("Server", arch, img)
-
-        result = localize_compose(
-            output_dir=str(tmp_path / "output"),
-            images=im,
-            parallel_downloads=2,
-            fail_fast=True,
-            verify_checksums=False,
-        )
-
-        assert result.downloaded == 0
-        assert result.failed >= 1
-        assert len(result.errors) >= 1
-
-    @patch("productmd.oci.get_downloader")
-    @patch("productmd.oci.HAS_ORAS", True)
-    def test_parallel_oci_no_fail_fast_continues(self, mock_get_downloader, tmp_path):
-        """Test that fail_fast=False continues after OCI errors in parallel mode."""
-        call_count = 0
-
-        def side_effect(**kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise RuntimeError("first pull failed")
-            # Subsequent calls succeed
-
-        mock_downloader = MagicMock()
-        mock_downloader.download_and_extract.side_effect = side_effect
-        mock_get_downloader.return_value = mock_downloader
-
-        im = Images()
-        im.header.version = "2.0"
-        im.compose.id = "Test-1.0-20260204.0"
-        im.compose.type = "production"
-        im.compose.date = "20260204"
-        im.compose.respin = 0
-        im.output_version = VERSION_2_0
-
-        for arch, hex_char in [("x86_64", "a"), ("aarch64", "b")]:
-            img = _make_image(im, f"Server/{arch}/iso/boot.iso", 512, hex_char * 64)
-            img.arch = arch
-            img.location = Location(
-                url=f"oci://quay.io/fedora/server:41-{arch}@sha256:" + hex_char * 64,
-                size=512,
-                checksum="sha256:" + hex_char * 64,
-                local_path=f"Server/{arch}/iso/boot.iso",
-            )
-            im.add("Server", arch, img)
-
-        result = localize_compose(
-            output_dir=str(tmp_path / "output"),
-            images=im,
-            parallel_downloads=2,
-            fail_fast=False,
-            verify_checksums=False,
-        )
-
-        assert result.downloaded == 1
-        assert result.failed == 1
-        assert len(result.errors) == 1
-
-    @patch("productmd.oci.get_downloader")
-    @patch("productmd.oci.HAS_ORAS", True)
-    def test_sequential_oci_with_parallel_1(self, mock_get_downloader, tmp_path):
-        """Test that parallel_downloads=1 uses sequential OCI path."""
-        mock_downloader = MagicMock()
-        mock_get_downloader.return_value = mock_downloader
-
-        im = Images()
-        im.header.version = "2.0"
-        im.compose.id = "Test-1.0-20260204.0"
-        im.compose.type = "production"
-        im.compose.date = "20260204"
-        im.compose.respin = 0
-        im.output_version = VERSION_2_0
-
-        for arch, hex_char in [("x86_64", "a"), ("aarch64", "b")]:
-            img = _make_image(im, f"Server/{arch}/iso/boot.iso", 512, hex_char * 64)
-            img.arch = arch
-            img.location = Location(
-                url=f"oci://quay.io/fedora/server:41-{arch}@sha256:" + hex_char * 64,
-                size=512,
-                checksum="sha256:" + hex_char * 64,
-                local_path=f"Server/{arch}/iso/boot.iso",
-            )
-            im.add("Server", arch, img)
-
-        result = localize_compose(
-            output_dir=str(tmp_path / "output"),
-            images=im,
-            parallel_downloads=1,
-            verify_checksums=False,
-        )
-
-        assert result.downloaded == 2
-        assert result.failed == 0
-        # Each task still creates its own downloader
-        assert mock_get_downloader.call_count == 2
-
-    @patch("productmd.oci.get_downloader")
-    @patch("productmd.oci.HAS_ORAS", True)
-    def test_download_single_oci_creates_own_downloader(self, mock_get_downloader, tmp_path):
-        """Test that _download_single_oci creates a fresh downloader per call."""
-        mock_downloader = MagicMock()
-        mock_get_downloader.return_value = mock_downloader
-
-        task = OciTask(
-            oci_url="oci://registry/repo@sha256:" + "a" * 64,
-            dest_dir=str(tmp_path / "out"),
-            contents=[],
-            location=Location(
-                url="oci://registry/repo@sha256:" + "a" * 64,
-                size=100,
-                local_path="out",
-            ),
-            rel_path="out/file",
-        )
-
-        _download_single_oci(task, progress_callback=None)
-        _download_single_oci(task, progress_callback=None)
-
-        # get_downloader called once per invocation (fresh downloader each time)
-        assert mock_get_downloader.call_count == 2
 
 
 # ---------------------------------------------------------------------------

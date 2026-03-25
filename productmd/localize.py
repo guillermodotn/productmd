@@ -6,6 +6,10 @@ v1.2 filesystem layout.  Supports HTTPS/HTTP and OCI registry downloads
 with parallel execution, checksum verification, and configurable error
 handling.
 
+HTTP downloads support authentication via ``~/.netrc`` (or a custom
+netrc file).  Credentials matching the download URL hostname are sent
+as HTTP Basic authentication headers.
+
 OCI registry downloads require the ``oras-py`` package
 (``pip install productmd[oci]``).  Authentication supports both Docker
 and Podman credential stores (``docker login`` / ``podman login``).
@@ -29,13 +33,16 @@ Example::
 """
 
 import logging
+import netrc
 import os
 import time
 import urllib.request
+from base64 import b64encode
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 
 from productmd.common import _get_default_headers
 from productmd.convert import downgrade_to_v1, iter_all_locations
@@ -92,6 +99,127 @@ Result of a localization operation.
 """
 
 
+def _get_netrc_auth_header(
+    url: str,
+    netrc_file: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Look up HTTP Basic auth credentials from a netrc file.
+
+    Searches the netrc file for credentials matching the hostname in
+    *url*.  If found, returns a ``Basic`` Authorization header value.
+
+    :param url: URL whose hostname is used for the netrc lookup
+    :param netrc_file: Path to a netrc file.  When ``None``, the
+        standard ``~/.netrc`` (or ``~/_netrc`` on Windows) is used.
+    :return: ``"Basic <base64>"`` string, or ``None`` if no credentials
+        are found or the netrc file is missing / malformed
+    """
+    try:
+        rc = netrc.netrc(netrc_file)
+        host = urlparse(url).hostname
+        if not host:
+            return None
+        auth = rc.authenticators(host)
+        if auth:
+            login, _, password = auth
+            credentials = b64encode(f"{login}:{password}".encode()).decode()
+            return f"Basic {credentials}"
+    except (FileNotFoundError, netrc.NetrcParseError, OSError) as e:
+        logger.debug("netrc lookup failed: %s", e)
+    return None
+
+
+def _validate_credential(value: str, name: str) -> str:
+    """Reject credential values containing CR or LF to prevent header injection.
+
+    :param value: The credential value to validate
+    :param name: Human-readable name for error messages (e.g., "token")
+    :return: The value unchanged if valid
+    :raises ValueError: If the value contains CR or LF characters
+    """
+    if "\r" in value or "\n" in value:
+        raise ValueError(f"{name} contains illegal newline characters")
+    return value
+
+
+def _build_auth_header(
+    url: str,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    token: Optional[str] = None,
+    netrc_file: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Resolve an HTTP Authorization header value.
+
+    Determines the appropriate authorization header using the following
+    precedence (highest first):
+
+    1. Bearer token (``token``)
+    2. Explicit Basic credentials (``username`` + ``password``)
+    3. Netrc lookup by URL hostname
+
+    :param url: URL whose hostname is used for netrc lookup
+    :param username: Username for HTTP Basic authentication
+    :param password: Password for HTTP Basic authentication
+    :param token: Bearer token for HTTP authentication
+    :param netrc_file: Path to a netrc file (default: ``~/.netrc``)
+    :return: Authorization header value, or ``None`` if no credentials
+        are available
+    :raises ValueError: If any credential contains CR or LF characters
+    """
+    if token is not None:
+        _validate_credential(token, "token")
+        return f"Bearer {token}"
+    if username is not None and password is not None:
+        _validate_credential(username, "username")
+        _validate_credential(password, "password")
+        credentials = b64encode(f"{username}:{password}".encode()).decode()
+        return f"Basic {credentials}"
+    return _get_netrc_auth_header(url, netrc_file)
+
+
+def _effective_port(parsed):
+    """Return the effective port for a parsed URL.
+
+    Resolves ``None`` (no explicit port) to the default port for the
+    scheme: 443 for HTTPS, 80 for HTTP.  This prevents false mismatches
+    when comparing ``https://host/path`` (port=None) with
+    ``https://host:443/path`` (port=443).
+    """
+    if parsed.port is not None:
+        return parsed.port
+    return 443 if parsed.scheme == "https" else 80
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Redirect handler that strips Authorization on cross-origin redirects.
+
+    Prevents credential leakage when a server (e.g. Pulp) redirects to
+    a different origin (e.g. CDN or S3 presigned URL).  Matches curl's
+    default behavior of comparing scheme + host + port.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is not None:
+            original = urlparse(req.full_url)
+            redirect = urlparse(new_req.full_url)
+            original_origin = (original.scheme, original.hostname, _effective_port(original))
+            redirect_origin = (redirect.scheme, redirect.hostname, _effective_port(redirect))
+            if original_origin != redirect_origin:
+                new_req.remove_header("Authorization")
+                logger.debug(
+                    "Stripped Authorization header on redirect from %s to %s",
+                    req.full_url,
+                    newurl,
+                )
+        return new_req
+
+
+_opener = urllib.request.build_opener(_SafeRedirectHandler)
+
 #: Default chunk size for streaming downloads (8 KB)
 _CHUNK_SIZE = 8192
 
@@ -115,6 +243,10 @@ def _download_https(
     retries: int = 3,
     progress_callback: Optional[Callable] = None,
     filename: str = "",
+    netrc_file: Optional[str] = None,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    token: Optional[str] = None,
 ) -> None:
     """
     Download a file from an HTTP(S) URL to a local path.
@@ -123,11 +255,22 @@ def _download_https(
     atomically to avoid partial files.  Retries on failure with
     exponential backoff.
 
+    Authentication is resolved via :func:`_build_auth_header` with the
+    following precedence: Bearer *token* > explicit *username*/*password*
+    (Basic) > netrc lookup.  Authorization headers are automatically
+    stripped on cross-origin redirects to prevent credential leakage.
+
     :param url: HTTP(S) URL to download from
     :param dest_path: Local file path to save to
     :param retries: Number of retry attempts (default: 3)
     :param progress_callback: Optional callback for progress events
     :param filename: Relative path for progress event reporting
+    :param netrc_file: Path to a netrc file for credential lookup.
+        When ``None``, the standard ``~/.netrc`` is used.
+    :param username: Username for HTTP Basic authentication.
+    :param password: Password for HTTP Basic authentication.
+    :param token: Bearer token for HTTP authentication.
+        Takes precedence over Basic credentials and netrc.
     :raises urllib.error.URLError: If all retry attempts fail
     """
     parent_dir = os.path.dirname(dest_path)
@@ -137,10 +280,15 @@ def _download_https(
     tmp_path = dest_path + ".tmp"
     last_error = None
 
+    headers = _get_default_headers()
+    auth_header = _build_auth_header(url, username, password, token, netrc_file)
+    if auth_header:
+        headers["Authorization"] = auth_header
+
     for attempt in range(retries + 1):
         try:
-            req = urllib.request.Request(url, headers=_get_default_headers())
-            response = urllib.request.urlopen(req)
+            req = urllib.request.Request(url, headers=headers)
+            response = _opener.open(req)
             content_length = response.headers.get("Content-Length")
             total = int(content_length) if content_length else None
 
@@ -165,6 +313,9 @@ def _download_https(
         except (HTTPError, URLError, OSError) as e:
             last_error = e
             logger.warning("Download attempt %d/%d failed for %s: %s", attempt + 1, retries + 1, url, e)
+            # Auth errors won't be fixed by retrying
+            if isinstance(e, HTTPError) and e.code in (401, 403):
+                raise
             # Clean up partial temp file
             if os.path.exists(tmp_path):
                 try:
@@ -579,6 +730,10 @@ def localize_compose(
     fail_fast: bool = True,
     retries: int = 3,
     progress_callback: Optional[Callable] = None,
+    netrc_file: Optional[str] = None,
+    http_username: Optional[str] = None,
+    http_password: Optional[str] = None,
+    http_token: Optional[str] = None,
 ) -> LocalizeResult:
     """
     Localize a distributed v2.0 compose to local storage.
@@ -590,6 +745,9 @@ def localize_compose(
     Supports both HTTPS/HTTP and OCI registry downloads.  OCI downloads
     require ``oras-py`` (``pip install productmd[oci]``).  Authentication
     supports Docker and Podman credential stores.
+
+    HTTP downloads support authentication with the following precedence:
+    Bearer token > explicit Basic credentials > netrc lookup.
 
     :param output_dir: Local directory to create the compose layout
     :param images: :class:`~productmd.images.Images` instance
@@ -605,10 +763,25 @@ def localize_compose(
     :param retries: Number of retry attempts per download (default: 3)
     :param progress_callback: Optional callable receiving
         :class:`DownloadEvent` instances for progress tracking
+    :param netrc_file: Path to a netrc file for HTTP credential lookup.
+        When ``None``, the standard ``~/.netrc`` is used.
+    :param http_username: Username for HTTP Basic authentication.
+    :param http_password: Password for HTTP Basic authentication.
+    :param http_token: Bearer token for HTTP authentication.
+        Takes precedence over Basic credentials and netrc.
+        Mutually exclusive with ``http_username``/``http_password``.
     :return: :class:`LocalizeResult` with download statistics
     :raises RuntimeError: If OCI URLs are present but oras-py is not installed
     :raises urllib.error.URLError: If a download fails and fail_fast is True
+    :raises ValueError: If auth parameters are invalid (e.g., username
+        without password, or token with username/password)
     """
+    # Validate auth parameters
+    if (http_username is None) != (http_password is None):
+        raise ValueError("http_username and http_password must be provided together")
+    if http_token and (http_username or http_password):
+        raise ValueError("http_token is mutually exclusive with http_username/http_password")
+
     # Collect all remote download tasks
     http_tasks, oci_tasks = _collect_download_tasks(
         output_dir,
@@ -644,7 +817,17 @@ def localize_compose(
         # Sequential downloads
         for task in download_tasks:
             try:
-                _download_https(task.url, task.dest_path, retries, progress_callback, task.rel_path)
+                _download_https(
+                    task.url,
+                    task.dest_path,
+                    retries,
+                    progress_callback,
+                    task.rel_path,
+                    netrc_file,
+                    http_username,
+                    http_password,
+                    http_token,
+                )
                 # Verify checksum after download
                 if verify_checksums and task.location is not None and task.location.checksum is not None:
                     if not task.location.verify(task.dest_path):
@@ -669,6 +852,10 @@ def localize_compose(
                     retries,
                     progress_callback,
                     task.rel_path,
+                    netrc_file,
+                    http_username,
+                    http_password,
+                    http_token,
                 )
                 future_to_task[future] = task
 
