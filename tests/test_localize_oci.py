@@ -36,8 +36,8 @@ def _make_image(parent, path, size, checksum_hex):
     return img
 
 
-def _mock_urlopen(content=b"fake file content", status=200, content_length=None):
-    """Create a mock response for urllib.request.urlopen."""
+def _mock_response(content=b"fake file content", status=200, content_length=None):
+    """Create a mock HTTP response for _opener.open()."""
     response = MagicMock()
     data = io.BytesIO(content)
     response.read = data.read
@@ -255,10 +255,10 @@ class TestOciLocalizeIntegration:
 
     @patch("productmd.oci.get_downloader")
     @patch("productmd.oci.HAS_ORAS", True)
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_mixed_http_and_oci_downloads(self, mock_urlopen, mock_get_downloader, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_mixed_http_and_oci_downloads(self, mock_open, mock_get_downloader, tmp_path):
         """Test that a compose with both HTTP and OCI URLs works."""
-        mock_urlopen.return_value = _mock_urlopen(b"http content")
+        mock_open.return_value = _mock_response(b"http content")
         mock_downloader = MagicMock()
         mock_get_downloader.return_value = mock_downloader
 
@@ -299,7 +299,7 @@ class TestOciLocalizeIntegration:
 
         assert result.downloaded == 2
         assert result.failed == 0
-        mock_urlopen.assert_called_once()
+        mock_open.assert_called_once()
         mock_downloader.download_and_extract.assert_called_once()
 
 

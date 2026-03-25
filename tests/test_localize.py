@@ -112,8 +112,8 @@ def _create_images_v1():
     return im
 
 
-def _mock_urlopen(content=b"fake file content", status=200, content_length=None):
-    """Create a mock response for urllib.request.urlopen."""
+def _mock_response(content=b"fake file content", status=200, content_length=None):
+    """Create a mock HTTP response for _opener.open()."""
     response = MagicMock()
     data = io.BytesIO(content)
     response.read = data.read
@@ -132,10 +132,10 @@ def _mock_urlopen(content=b"fake file content", status=200, content_length=None)
 class TestDownloadHttps:
     """Tests for the _download_https function."""
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_download_creates_file(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_download_creates_file(self, mock_open, tmp_path):
         """Test that download creates the file at the correct path."""
-        mock_urlopen.return_value = _mock_urlopen(b"hello world")
+        mock_open.return_value = _mock_response(b"hello world")
         dest = str(tmp_path / "output" / "test.txt")
 
         _download_https("https://example.com/test.txt", dest, retries=0)
@@ -144,20 +144,20 @@ class TestDownloadHttps:
         with open(dest, "rb") as f:
             assert f.read() == b"hello world"
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_download_creates_parent_dirs(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_download_creates_parent_dirs(self, mock_open, tmp_path):
         """Test that parent directories are created automatically."""
-        mock_urlopen.return_value = _mock_urlopen(b"data")
+        mock_open.return_value = _mock_response(b"data")
         dest = str(tmp_path / "a" / "b" / "c" / "file.rpm")
 
         _download_https("https://example.com/file.rpm", dest, retries=0)
 
         assert os.path.isfile(dest)
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_download_atomic_rename(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_download_atomic_rename(self, mock_open, tmp_path):
         """Test that .tmp file is renamed to final name (no partial files)."""
-        mock_urlopen.return_value = _mock_urlopen(b"content")
+        mock_open.return_value = _mock_response(b"content")
         dest = str(tmp_path / "final.iso")
 
         _download_https("https://example.com/final.iso", dest, retries=0)
@@ -165,16 +165,16 @@ class TestDownloadHttps:
         assert os.path.isfile(dest)
         assert not os.path.exists(dest + ".tmp")
 
-    @patch("productmd.localize.urllib.request.urlopen")
+    @patch("productmd.localize._opener.open")
     @patch("productmd.localize.time.sleep")
-    def test_download_retry_on_failure(self, mock_sleep, mock_urlopen, tmp_path):
+    def test_download_retry_on_failure(self, mock_sleep, mock_open, tmp_path):
         """Test that download retries on failure with exponential backoff."""
         from urllib.error import URLError
 
-        mock_urlopen.side_effect = [
+        mock_open.side_effect = [
             URLError("connection refused"),
             URLError("timeout"),
-            _mock_urlopen(b"success"),
+            _mock_response(b"success"),
         ]
         dest = str(tmp_path / "retried.txt")
 
@@ -185,11 +185,11 @@ class TestDownloadHttps:
             assert f.read() == b"success"
         assert mock_sleep.call_count == 2
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_download_calls_progress_callback(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_download_calls_progress_callback(self, mock_open, tmp_path):
         """Test that progress callback receives correct events."""
         content = b"x" * 100
-        mock_urlopen.return_value = _mock_urlopen(content)
+        mock_open.return_value = _mock_response(content)
         dest = str(tmp_path / "progress.bin")
 
         events = []
@@ -215,12 +215,12 @@ class TestDownloadHttps:
         complete = events[-1]
         assert complete.bytes_downloaded == 100
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_download_all_retries_exhausted(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_download_all_retries_exhausted(self, mock_open, tmp_path):
         """Test that exception is raised when all retries are exhausted."""
         from urllib.error import URLError
 
-        mock_urlopen.side_effect = URLError("permanent failure")
+        mock_open.side_effect = URLError("permanent failure")
         dest = str(tmp_path / "fail.txt")
 
         with pytest.raises(URLError):
@@ -283,10 +283,10 @@ class TestShouldSkip:
 class TestLocalizeCompose:
     """Tests for the localize_compose function."""
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_basic_localize(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_basic_localize(self, mock_open, tmp_path):
         """Test basic localization downloads files and writes v1.2 metadata."""
-        mock_urlopen.return_value = _mock_urlopen(b"iso content")
+        mock_open.return_value = _mock_response(b"iso content")
         output_dir = str(tmp_path / "compose-output")
 
         im = _create_images_v2()
@@ -309,8 +309,8 @@ class TestLocalizeCompose:
         metadata_dir = os.path.join(output_dir, "compose", "metadata")
         assert os.path.isfile(os.path.join(metadata_dir, "images.json"))
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_skip_existing_with_valid_checksum(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_skip_existing_with_valid_checksum(self, mock_open, tmp_path):
         """Test that existing files with valid checksum are skipped."""
         output_dir = str(tmp_path / "compose-output")
 
@@ -345,14 +345,14 @@ class TestLocalizeCompose:
         assert result.skipped == 1
         assert result.downloaded == 0
         # urlopen should not have been called
-        mock_urlopen.assert_not_called()
+        mock_open.assert_not_called()
 
-    @patch("productmd.localize.urllib.request.urlopen")
+    @patch("productmd.localize._opener.open")
     @patch("productmd.localize._should_skip")
-    def test_skip_existing_wrong_checksum_redownloads(self, mock_skip, mock_urlopen, tmp_path):
+    def test_skip_existing_wrong_checksum_redownloads(self, mock_skip, mock_open, tmp_path):
         """Test that files with wrong checksum are re-downloaded when skip returns False."""
         mock_skip.return_value = False  # Simulate checksum mismatch
-        mock_urlopen.return_value = _mock_urlopen(b"correct content")
+        mock_open.return_value = _mock_response(b"correct content")
 
         im = _create_images_v2()
         result = localize_compose(
@@ -475,12 +475,12 @@ class TestLocalizeCompose:
                 images=im,
             )
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_fail_fast_stops_on_error(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_fail_fast_stops_on_error(self, mock_open, tmp_path):
         """Test that fail_fast=True stops on first download failure."""
         from urllib.error import URLError
 
-        mock_urlopen.side_effect = URLError("connection refused")
+        mock_open.side_effect = URLError("connection refused")
 
         im = _create_images_v2()
         rpms = _create_rpms_v2()
@@ -498,15 +498,15 @@ class TestLocalizeCompose:
         # Should not have attempted all downloads
         assert result.downloaded == 0
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_fail_fast_false_continues(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_fail_fast_false_continues(self, mock_open, tmp_path):
         """Test that fail_fast=False continues after errors."""
         from urllib.error import URLError
 
         # First call fails, second succeeds
-        mock_urlopen.side_effect = [
+        mock_open.side_effect = [
             URLError("connection refused"),
-            _mock_urlopen(b"rpm content"),
+            _mock_response(b"rpm content"),
         ]
 
         im = _create_images_v2()
@@ -540,10 +540,10 @@ class TestLocalizeCompose:
         assert result.skipped == 0
         assert result.failed == 0
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_localize_result_counts(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_localize_result_counts(self, mock_open, tmp_path):
         """Test that LocalizeResult has correct counts."""
-        mock_urlopen.return_value = _mock_urlopen(b"data")
+        mock_open.return_value = _mock_response(b"data")
 
         im = _create_images_v2()
         result = localize_compose(
@@ -560,10 +560,10 @@ class TestLocalizeCompose:
         assert result.failed == 0
         assert result.errors == []
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_progress_callback_receives_events(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_progress_callback_receives_events(self, mock_open, tmp_path):
         """Test that progress callback receives download events."""
-        mock_urlopen.return_value = _mock_urlopen(b"file data")
+        mock_open.return_value = _mock_response(b"file data")
 
         im = _create_images_v2()
         events = []
@@ -581,12 +581,12 @@ class TestLocalizeCompose:
         assert "start" in event_types
         assert "complete" in event_types
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_metadata_downgraded_to_v12(self, mock_urlopen, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_metadata_downgraded_to_v12(self, mock_open, tmp_path):
         """Test that output metadata is written in v1.2 format."""
         import json
 
-        mock_urlopen.return_value = _mock_urlopen(b"content")
+        mock_open.return_value = _mock_response(b"content")
 
         im = _create_images_v2()
         output_dir = str(tmp_path / "output")

@@ -218,10 +218,7 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         return new_req
 
 
-# Install the safe redirect handler globally so that all urlopen() calls
-# in this module automatically strip Authorization on cross-origin redirects.
-urllib.request.install_opener(urllib.request.build_opener(_SafeRedirectHandler))
-
+_opener = urllib.request.build_opener(_SafeRedirectHandler)
 
 #: Default chunk size for streaming downloads (8 KB)
 _CHUNK_SIZE = 8192
@@ -291,7 +288,7 @@ def _download_https(
     for attempt in range(retries + 1):
         try:
             req = urllib.request.Request(url, headers=headers)
-            response = urllib.request.urlopen(req)
+            response = _opener.open(req)
             content_length = response.headers.get("Content-Length")
             total = int(content_length) if content_length else None
 

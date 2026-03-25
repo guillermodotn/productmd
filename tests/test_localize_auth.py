@@ -61,8 +61,8 @@ def _create_images_v2():
     return im
 
 
-def _mock_urlopen(content=b"fake file content", status=200, content_length=None):
-    """Create a mock response for urllib.request.urlopen."""
+def _mock_response(content=b"fake file content", status=200, content_length=None):
+    """Create a mock HTTP response for _opener.open()."""
     response = MagicMock()
     data = io.BytesIO(content)
     response.read = data.read
@@ -253,56 +253,56 @@ class TestBuildAuthHeader:
 class TestDownloadHttpsAuth:
     """Tests for authentication in _download_https."""
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_download_sends_basic_auth_header(self, mock_urlopen_fn, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_download_sends_basic_auth_header(self, mock_open, tmp_path):
         """Test that explicit credentials add Authorization header to request."""
-        mock_urlopen_fn.return_value = _mock_urlopen(b"content")
+        mock_open.return_value = _mock_response(b"content")
         dest = str(tmp_path / "file.rpm")
 
         _download_https("https://pulp.example.com/file.rpm", dest, retries=0, username="admin", password="secret")
 
-        req = mock_urlopen_fn.call_args[0][0]
+        req = mock_open.call_args[0][0]
         assert req.get_header("Authorization").startswith("Basic ")
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_download_sends_bearer_token_header(self, mock_urlopen_fn, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_download_sends_bearer_token_header(self, mock_open, tmp_path):
         """Test that a token adds a Bearer Authorization header."""
-        mock_urlopen_fn.return_value = _mock_urlopen(b"content")
+        mock_open.return_value = _mock_response(b"content")
         dest = str(tmp_path / "file.rpm")
 
         _download_https("https://pulp.example.com/file.rpm", dest, retries=0, token="jwt-token-here")
 
-        req = mock_urlopen_fn.call_args[0][0]
+        req = mock_open.call_args[0][0]
         assert req.get_header("Authorization") == "Bearer jwt-token-here"
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_download_sends_netrc_auth_header(self, mock_urlopen_fn, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_download_sends_netrc_auth_header(self, mock_open, tmp_path):
         """Test that netrc credentials add Authorization header."""
-        mock_urlopen_fn.return_value = _mock_urlopen(b"content")
+        mock_open.return_value = _mock_response(b"content")
         netrc_file = tmp_path / ".netrc"
         netrc_file.write_text("machine pulp.example.com\nlogin admin\npassword secret\n")
         dest = str(tmp_path / "file.rpm")
 
         _download_https("https://pulp.example.com/file.rpm", dest, retries=0, netrc_file=str(netrc_file))
 
-        req = mock_urlopen_fn.call_args[0][0]
+        req = mock_open.call_args[0][0]
         assert req.get_header("Authorization").startswith("Basic ")
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_download_no_auth_by_default(self, mock_urlopen_fn, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_download_no_auth_by_default(self, mock_open, tmp_path):
         """Test that no Authorization header is set when no auth is configured."""
-        mock_urlopen_fn.return_value = _mock_urlopen(b"content")
+        mock_open.return_value = _mock_response(b"content")
         dest = str(tmp_path / "file.rpm")
 
         _download_https("https://pulp.example.com/file.rpm", dest, retries=0, netrc_file="/nonexistent/.netrc")
 
-        req = mock_urlopen_fn.call_args[0][0]
+        req = mock_open.call_args[0][0]
         assert req.get_header("Authorization") is None
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_localize_compose_passes_auth_credentials(self, mock_urlopen_fn, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_localize_compose_passes_auth_credentials(self, mock_open, tmp_path):
         """Test that localize_compose passes auth params to _download_https."""
-        mock_urlopen_fn.return_value = _mock_urlopen(b"x" * 512)
+        mock_open.return_value = _mock_response(b"x" * 512)
         images = _create_images_v2()
 
         localize_compose(
@@ -314,26 +314,26 @@ class TestDownloadHttpsAuth:
             http_password="pass",
         )
 
-        req = mock_urlopen_fn.call_args[0][0]
+        req = mock_open.call_args[0][0]
         assert req.get_header("Authorization").startswith("Basic ")
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_localize_compose_passes_token(self, mock_urlopen_fn, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_localize_compose_passes_token(self, mock_open, tmp_path):
         """Test that localize_compose passes token to _download_https."""
-        mock_urlopen_fn.return_value = _mock_urlopen(b"x" * 512)
+        mock_open.return_value = _mock_response(b"x" * 512)
         images = _create_images_v2()
 
         localize_compose(
             output_dir=str(tmp_path), images=images, parallel_downloads=1, verify_checksums=False, http_token="my-bearer-token"
         )
 
-        req = mock_urlopen_fn.call_args[0][0]
+        req = mock_open.call_args[0][0]
         assert req.get_header("Authorization") == "Bearer my-bearer-token"
 
-    @patch("productmd.localize.urllib.request.urlopen")
-    def test_parallel_downloads_send_auth(self, mock_urlopen_fn, tmp_path):
+    @patch("productmd.localize._opener.open")
+    def test_parallel_downloads_send_auth(self, mock_open, tmp_path):
         """Test that auth headers are sent when using parallel downloads."""
-        mock_urlopen_fn.return_value = _mock_urlopen(b"x" * 512)
+        mock_open.return_value = _mock_response(b"x" * 512)
         images = _create_images_v2()
 
         localize_compose(
@@ -345,7 +345,7 @@ class TestDownloadHttpsAuth:
             http_password="secret",
         )
 
-        for call in mock_urlopen_fn.call_args_list:
+        for call in mock_open.call_args_list:
             req = call[0][0]
             assert req.get_header("Authorization").startswith("Basic ")
 
