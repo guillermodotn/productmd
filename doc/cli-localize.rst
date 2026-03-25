@@ -4,7 +4,7 @@ productmd-localize
 Synopsis
 --------
 
-**productmd localize** **--output** *DIR* [**--parallel-downloads** *N*] [**--no-verify-checksums**] [**--skip-existing**] [**--retries** *N*] [**--no-fail-fast**] [**--http-token** *TOKEN*] [**--http-username** *USER* **--http-password** *PASS*] [**--netrc-file** *PATH*] *input*
+**productmd localize** **--output** *DIR* [**--parallel-downloads** *N*] [**--no-verify-checksums**] [**--skip-existing**] [**--retries** *N*] [**--no-fail-fast**] [**--http-username** *USER*] [**--netrc-file** *PATH*] *input*
 
 Description
 -----------
@@ -63,21 +63,26 @@ HTTP downloads support authentication for accessing protected content
 servers (e.g. Pulp).  Three mechanisms are available, resolved in the
 following precedence order (highest first):
 
-1. **Bearer token** — ``--http-token`` or ``$PRODUCTMD_HTTP_TOKEN``
-2. **Basic credentials** — ``--http-username`` + ``--http-password``
-   (or ``$PRODUCTMD_HTTP_PASSWORD``)
+1. **Bearer token** — ``$PRODUCTMD_HTTP_TOKEN``
+2. **Basic credentials** — ``--http-username`` + ``$PRODUCTMD_HTTP_PASSWORD``
 3. **Netrc** — automatic lookup from ``~/.netrc`` (or ``--netrc-file``)
 
 Only one of Bearer token or Basic credentials may be specified.
-Providing both ``--http-token`` and ``--http-username``/``--http-password``
-is an error.  Both ``--http-username`` and ``--http-password`` must be
-provided together.
+Setting ``$PRODUCTMD_HTTP_TOKEN`` together with
+``--http-username``/``$PRODUCTMD_HTTP_PASSWORD`` is an error.
 
 .. note::
 
-   When using ``--http-token`` or ``--http-username``/``--http-password``,
-   the credentials are sent to **all** HTTP download hosts referenced in
-   the compose metadata.  If your compose references multiple hosts, use
+   Sensitive credentials (password and token) are provided exclusively
+   via environment variables to avoid leaking them in shell history or
+   process listings.
+
+.. note::
+
+   When using ``$PRODUCTMD_HTTP_TOKEN`` or
+   ``--http-username``/``$PRODUCTMD_HTTP_PASSWORD``, the credentials
+   are sent to **all** HTTP download hosts referenced in the compose
+   metadata.  If your compose references multiple hosts, use
    ``~/.netrc`` instead — it resolves credentials per hostname
    automatically.
 
@@ -85,21 +90,11 @@ When no explicit credentials are given, the tool automatically checks
 ``~/.netrc`` for entries matching the download URL hostname.  This is
 transparent and requires no CLI flags.
 
-**--http-token** *TOKEN*
-    Bearer token for HTTP authentication.  Sent as
-    ``Authorization: Bearer <TOKEN>``.  Useful for Keycloak/OAuth2-based
-    Pulp deployments.  Can also be set via the ``PRODUCTMD_HTTP_TOKEN``
-    environment variable.  Mutually exclusive with
-    ``--http-username``/``--http-password``.
-
 **--http-username** *USER*
-    Username for HTTP Basic authentication.  Must be combined with
-    ``--http-password``.  Takes precedence over netrc credentials.
-
-**--http-password** *PASS*
-    Password for HTTP Basic authentication.  Can also be set via the
-    ``PRODUCTMD_HTTP_PASSWORD`` environment variable to avoid exposing
-    the password in shell history.
+    Username for HTTP Basic authentication.  Password must be set via
+    the ``PRODUCTMD_HTTP_PASSWORD`` environment variable.  Takes
+    precedence over netrc credentials.  For Bearer token auth, set
+    ``PRODUCTMD_HTTP_TOKEN`` instead.
 
 **--netrc-file** *PATH*
     Path to a netrc file for credential lookup.  Default: ``~/.netrc``.
@@ -178,9 +173,9 @@ Continue after failures::
 
 Download with a Bearer token::
 
+    export PRODUCTMD_HTTP_TOKEN=eyJhbGciOiJSUzI1NiIs...
     productmd localize \
         --output /mnt/local \
-        --http-token eyJhbGciOiJSUzI1NiIs... \
         images.json
 
 Download with Basic auth (password via env var)::

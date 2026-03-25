@@ -77,21 +77,11 @@ def register(subparsers: object) -> None:
     parser.add_argument(
         "--http-username",
         default=None,
-        help=("Username for HTTP Basic authentication. Takes precedence over netrc credentials."),
-    )
-    parser.add_argument(
-        "--http-password",
-        default=os.environ.get("PRODUCTMD_HTTP_PASSWORD"),
-        help=("Password for HTTP Basic authentication. Can also be set via PRODUCTMD_HTTP_PASSWORD env var."),
-    )
-    parser.add_argument(
-        "--http-token",
-        default=os.environ.get("PRODUCTMD_HTTP_TOKEN"),
         help=(
-            "Bearer token for HTTP authentication. "
-            "Takes precedence over Basic credentials and netrc. "
-            "Mutually exclusive with --http-username/--http-password. "
-            "Can also be set via PRODUCTMD_HTTP_TOKEN env var."
+            "Username for HTTP Basic authentication. "
+            "Password must be set via PRODUCTMD_HTTP_PASSWORD env var. "
+            "Takes precedence over netrc credentials. "
+            "For Bearer token auth, set PRODUCTMD_HTTP_TOKEN env var instead."
         ),
     )
     add_input_args(parser)
@@ -109,16 +99,19 @@ def run(args: object) -> None:
         print_error(f"No metadata found at {args.input}")
         sys.exit(1)
 
-    if args.http_token and (args.http_username or args.http_password):
-        print_error("--http-token is mutually exclusive with --http-username/--http-password")
+    http_password = os.environ.get("PRODUCTMD_HTTP_PASSWORD")
+    http_token = os.environ.get("PRODUCTMD_HTTP_TOKEN")
+
+    if http_token and (args.http_username or http_password):
+        print_error("PRODUCTMD_HTTP_TOKEN is mutually exclusive with --http-username/PRODUCTMD_HTTP_PASSWORD")
         sys.exit(2)
 
-    if args.http_username and not args.http_password:
-        print_error("--http-username requires --http-password")
+    if args.http_username and not http_password:
+        print_error("--http-username requires PRODUCTMD_HTTP_PASSWORD env var")
         sys.exit(2)
 
-    if args.http_password and not args.http_username:
-        print_error("--http-password requires --http-username")
+    if http_password and not args.http_username:
+        print_error("PRODUCTMD_HTTP_PASSWORD requires --http-username")
         sys.exit(2)
 
     progress_callback, cleanup = make_progress_callback(parallel=args.parallel_downloads)
@@ -134,8 +127,8 @@ def run(args: object) -> None:
             progress_callback=progress_callback,
             netrc_file=args.netrc_file,
             http_username=args.http_username,
-            http_password=args.http_password,
-            http_token=args.http_token,
+            http_password=http_password,
+            http_token=http_token,
             **metadata,
         )
     finally:
