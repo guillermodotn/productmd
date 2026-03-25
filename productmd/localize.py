@@ -313,6 +313,9 @@ def _download_https(
         except (HTTPError, URLError, OSError) as e:
             last_error = e
             logger.warning("Download attempt %d/%d failed for %s: %s", attempt + 1, retries + 1, url, e)
+            # Auth errors won't be fixed by retrying
+            if isinstance(e, HTTPError) and e.code in (401, 403):
+                raise
             # Clean up partial temp file
             if os.path.exists(tmp_path):
                 try:

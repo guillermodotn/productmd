@@ -226,6 +226,34 @@ class TestDownloadHttps:
         with pytest.raises(URLError):
             _download_https("https://example.com/fail.txt", dest, retries=1)
 
+    @patch("productmd.localize._opener.open")
+    def test_download_no_retry_on_401(self, mock_open, tmp_path):
+        """Test that 401 errors are raised immediately without retrying."""
+        from urllib.error import HTTPError
+
+        mock_open.side_effect = HTTPError("https://example.com/file.rpm", 401, "Unauthorized", {}, None)
+        dest = str(tmp_path / "auth_fail.txt")
+
+        with pytest.raises(HTTPError) as exc_info:
+            _download_https("https://example.com/file.rpm", dest, retries=3)
+
+        assert exc_info.value.code == 401
+        mock_open.assert_called_once()
+
+    @patch("productmd.localize._opener.open")
+    def test_download_no_retry_on_403(self, mock_open, tmp_path):
+        """Test that 403 errors are raised immediately without retrying."""
+        from urllib.error import HTTPError
+
+        mock_open.side_effect = HTTPError("https://example.com/file.rpm", 403, "Forbidden", {}, None)
+        dest = str(tmp_path / "forbidden.txt")
+
+        with pytest.raises(HTTPError) as exc_info:
+            _download_https("https://example.com/file.rpm", dest, retries=3)
+
+        assert exc_info.value.code == 403
+        mock_open.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # Tests: _should_skip
